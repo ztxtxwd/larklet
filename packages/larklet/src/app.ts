@@ -3,7 +3,13 @@ import path from 'node:path';
 import { ACTION_ID_KEY, ACTION_PARAMS_KEY, getRegisteredAction } from '@open-feishu-card/components';
 import type { FeishuCardJson } from '@open-feishu-card/components';
 
-import { decryptBody, normalizeIncoming, type CardAction, type MenuEvent } from './events.js';
+import { decryptBody, normalizeIncoming, readEvent, type CardAction, type LarkletEvent, type MenuEvent } from './events.js';
+import {
+  handlersForEvent,
+  loadEventHandlers,
+  type LarkletEventHandler,
+  type LarkletEventHandlers,
+} from './event-handlers.js';
 import { isNotFoundError, isRedirectError } from './navigation.js';
 import { renderCard, type RenderedCard } from './render.js';
 import {
@@ -41,7 +47,15 @@ export interface CreateLarkletOptions {
   appId?: string;
   /** 飞书应用 App Secret，与 `appId` 成对配置。 */
   appSecret?: string;
+  /**
+   * 先于默认分发处理飞书事件。可以传一个函数（收到所有事件），
+   * 也可以传 `{ 事件类型: 处理函数 }`；键支持 `im.chat.*` 前缀通配和 `*` 兜底。
+   * 处理函数返回 `undefined` 表示放行，继续后面的处理函数，最后走默认分发。
+   */
+  onEvent?: LarkletEventHandler | Record<string, LarkletEventHandler>;
 }
+
+export type { LarkletEvent, LarkletEventHandler, LarkletEventHandlers };
 
 export interface RenderInit {
   searchParams?: SearchParams;
@@ -56,10 +70,30 @@ export interface HandleOptions {
    * 结果留在 `LarkletHandled.ephemeral` / `deletedEphemeral` / `messages`。本地预览使用。
    */
   captureEphemeral?: boolean;
+  /**
+   * 事件已经由传输层验明身份（长连接用 app_id / app_secret 握手，或本地预览）。
+   * 为 true 时不再比对 verification token。只在你自己实现了等价鉴权的通道上传。
+   */
+  trustedTransport?: boolean;
+  /** 事件来自哪里，会原样交给 `onEvent`。 */
+  transport?: LarkletEvent['transport'];
+  /**
+   * 为 true 时这个 body 是调用方自己拼的（本地预览），不算飞书事件，
+   * 不交给 `onEvent` / `app/events.*`，只走卡片回调与菜单的默认分发。
+   */
+  synthetic?: boolean;
+}
+
+/** 业务自己接管的事件。`response` 原样作为回调响应回传给飞书。 */
+export interface LarkletRawHandled {
+  type: 'raw';
+  eventType: string;
+  response: unknown;
 }
 
 export type LarkletHandled =
   | { type: 'challenge'; challenge: string }
+  | LarkletRawHandled
   | {
       type: 'card';
       toast?: Toast;
@@ -103,11 +137,28 @@ export async function createLarklet(options: CreateLarkletOptions = {}): Promise
   const appDir = path.join(dir, 'app');
   const { appId, appSecret } = resolveAppCredentials(options.appId, options.appSecret);
   let routes = await loadRoutes(appDir);
+  // 显式传入的 `onEvent` 与 `app/events.*` 按声明顺序各跑一遍。
+  const inlineHandlers = normalizeOnEvent(options.onEvent);
+  let fileHandlers = await loadEventHandlers(appDir);
 
   async function currentRoutes(): Promise<Route[]> {
     if (!options.dev) return routes;
     routes = await loadRoutes(appDir);
     return routes;
+  }
+
+  async function dispatchEvent(event: LarkletEvent): Promise<unknown> {
+    if (options.dev) fileHandlers = await loadEventHandlers(appDir);
+    // 显式传入的 `onEvent` 先跑，`app/events.*` 后跑；各自内部精确匹配先于通配。
+    const handlers = [
+      ...handlersForEvent(inlineHandlers, event.eventType),
+      ...handlersForEvent(fileHandlers, event.eventType),
+    ];
+    for (const handler of handlers) {
+      const response = await handler(event);
+      if (response !== undefined) return response;
+    }
+    return undefined;
   }
 
   async function renderRoute(href: string, init?: RouteRenderInit): Promise<FeishuCardJson> {
@@ -133,14 +184,30 @@ export async function createLarklet(options: CreateLarkletOptions = {}): Promise
 
   async function handle(body: unknown, handleOptions: HandleOptions = {}): Promise<LarkletHandled> {
     const decoded = decryptBody(body, options.encryptKey);
+    const assertToken = (actual: string | undefined): void => {
+      assertVerificationToken(options.verificationToken, actual, handleOptions.trustedTransport);
+    };
+
+    // 业务入口先看所有事件；返回 undefined 才走卡片回调 / 菜单的默认分发。
+    // 本地预览自己拼的卡片回调没有 event_id，不算业务事件。
+    const event = readEvent(decoded, {
+      transport: handleOptions.transport,
+      synthetic: handleOptions.synthetic,
+    });
+    if (event) {
+      assertToken(event.token);
+      const response = await dispatchEvent(event);
+      if (response !== undefined) return { type: 'raw', eventType: event.eventType, response };
+    }
+
     const incoming = normalizeIncoming(decoded);
     if (incoming.kind === 'ignore') return { type: 'empty' };
     if (incoming.kind === 'challenge') {
-      assertToken(options.verificationToken, incoming.token);
+      assertToken(incoming.token);
       return { type: 'challenge', challenge: incoming.challenge };
     }
     if (incoming.kind === 'menu') {
-      assertToken(options.verificationToken, incoming.menu.verificationToken);
+      assertToken(incoming.menu.verificationToken);
       const rendered = await dispatchMenu(await currentRoutes(), incoming.menu, {
         appId,
         appSecret,
@@ -157,7 +224,7 @@ export async function createLarklet(options: CreateLarkletOptions = {}): Promise
         controls: rendered.controls,
       };
     }
-    assertToken(options.verificationToken, incoming.action.verificationToken);
+    assertToken(incoming.action.verificationToken);
     const rendered = await dispatchAction(await currentRoutes(), incoming.action, {
       appId,
       appSecret,
@@ -315,9 +382,23 @@ function resolveAppCredentials(appId: string | undefined, appSecret: string | un
   return { appId: id, appSecret: secret };
 }
 
-function assertToken(expected: string | undefined, actual: string | undefined): void {
-  if (!expected || !actual) return;
+/**
+ * 配置了 verification token 时，HTTP 等未鉴权通道必须带上它。
+ * 长连接和本地预览由 `trustedTransport` 放行 —— 它们分别靠 app 凭证握手和 dev 开关把关。
+ */
+function assertVerificationToken(expected: string | undefined, actual: string | undefined, trusted = false): void {
+  if (!expected || trusted) return;
+  if (!actual) throw new LarkletError('请求缺少 verification token', 401);
   if (expected !== actual) throw new LarkletError('verification token 不匹配', 401);
+}
+
+/** `onEvent` 可以是一个函数，也可以是 `{ 事件类型: 处理函数 }`。 */
+function normalizeOnEvent(
+  onEvent: CreateLarkletOptions['onEvent'],
+): LarkletEventHandlers {
+  if (!onEvent) return new Map();
+  if (typeof onEvent === 'function') return new Map([['*', onEvent]]);
+  return new Map(Object.entries(onEvent));
 }
 
 function createStore(partial: Partial<LarkletStore> & { pathname: string }): LarkletStore {

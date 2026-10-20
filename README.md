@@ -131,9 +131,15 @@ export default {
 };
 ```
 
-改成 `connection: 'webhook'` 后，把请求地址指到 `POST /webhook`。两种方式都认加密密钥（`LARKLET_ENCRYPT_KEY`）和校验 token（`LARKLET_VERIFICATION_TOKEN`）。长连接还需要 `APP_ID` / `APP_SECRET`；没配凭证时本地预览照常开，只是不会连上飞书。
+改成 `connection: 'webhook'` 后，把请求地址指到 `POST /webhook`。两种方式都认加密密钥（`LARKLET_ENCRYPT_KEY`）和校验 token（`LARKLET_VERIFICATION_TOKEN`）。配置了校验 token 时，HTTP 请求必须带上它，缺失或不匹配一律 401；长连接用 `APP_ID` / `APP_SECRET` 握手鉴权，不走 token 比对。没配凭证时本地预览照常开，只是不会连上飞书。
 
 机器人自定义菜单（事件类型 `application.bot.menu_v6`）和访问端点是同一条路：`event_key` 就是路径，例如 `guide` 或 `/ticket/42?from=menu`。用户私聊发送 `/guide`，或在群聊里 `@机器人 /guide`，同样会把斜杠后的内容当作 `event_key`（需订阅 `im.message.receive_v1`）。
+
+应用目录下的 `app/catalog.ts`（也认 `.tsx` / `.jsx` / `.js`）列出配套网页加号菜单里可发送的应用：
+
+```ts
+export const apps = [{ href: '/ticket/REQ-42', title: '审批单', description: '打开一张审批单' }];
+```
 
 页面可以导出 `aliases`，让另一条路径打开同一张卡片。别名与页面路径同形，动态段沿用原来的参数名；只写静态前缀时，尾部动态段会补上。中文路径不用编码。命中别名后，卡片里记下的仍是页面自己的路径，所以 `/工单/42` 与 `/ticket/42` 是同一张卡片。两条路径不能指向不同页面。
 
@@ -166,17 +172,96 @@ pnpm dev:web
 
 生成工程里的 `larklet` 与 `larklet-web` 取 npm 上的版本，版本号跟随 `create-larklet` 自己。飞书后台把消息快捷操作的地址指到 web；应用需要读取消息、以应用身份发消息，并让用户授权 `im:message` 与 `im:message.send_as_user`。
 
+用户身份走 OAuth 2.0 的 `POST https://accounts.feishu.cn/oauth/v3/token`（旧的 `authen/v1/access_token`、`authen/v2/oauth/token` 都已是历史版本），再用 `user_access_token` 调 `authen/v1/user_info` 取 `open_id` / `union_id` / 姓名和头像。国际版把开放平台域名设成 `Lark` 或 `https://open.larksuite.com`，账号域名随之变成 `accounts.larksuite.com`。
+
+网页在浏览器里的飞书环境判定会同时看 UA 和 H5 SDK：`h5-js-sdk` 在任意浏览器都会给 `window.tt` / `window.h5sdk` 赋值，只看全局对象会把普通浏览器误判成飞书。JSSDK 鉴权失败时会降级成本地预览，而不是整页报错。从消息回读卡片再转发时，会按封印状态还原路径和查询串（`/framed?from=share`），卡片里的 `cardState`（例如一局游戏）按设计不复制。
+
 `larklet dev` / `larklet start` 会按配置连上飞书：长连接收到卡片点击后，把新卡片从同一条连接回传；菜单和斜杠命令没有回传体，由机器人发到对应会话（群聊进群，否则私聊）。自己收事件时也可以走同一个入口：
 
-```ts
-import { createLarklet, toCallbackResponse } from 'larklet';
+### 事件
 
-const app = await createLarklet({ dir: process.cwd() });
+所有飞书事件走同一个入口：`im.message.receive_v1`、`im.chat.member.user.added_v1`、`contact.user.deleted_v3`、`im.chat.updated_v1`、链接预览回调 `url.preview.get`……不区分订阅方式，也不区分 1.0 / 2.0。
+
+在应用目录写 `app/events.ts`，按事件类型注册处理函数：
+
+```ts
+// app/events.ts
+export const events = {
+  'im.message.receive_v1': async (event) => {
+    const message = event.event.message as { chat_id?: string; content?: string };
+    await myOwnHandler(message?.chat_id, message?.content);
+    return { code: 0 }; // 已接管
+  },
+  'im.chat.member.user.added_v1': async (event) => {
+    await welcome(event.event.chat_id as string);
+    // 不返回则继续后面的处理函数 / 默认分发
+  },
+  'im.chat.*': async (event) => logEvent(event), // 前缀通配
+  '*': async (event) => logUnknown(event),       // 兜底
+};
+```
+
+也可以默认导出单个函数，等价于 `'*'`；或者在 `createLarklet({ onEvent })` 里内联注册，支持同样的函数形式或对象形式。内联的 `onEvent` 先于 `app/events.ts` 运行。匹配顺序：精确类型 → 通配（按声明顺序）→ 兜底。
+
+处理函数拿到统一的 `LarkletEvent`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `eventType` | 事件类型，例如 `im.message.receive_v1` |
+| `header` | 2.0 的 `header`；1.0 事件由 `uuid` / `token` / `event.type` 补成同形 |
+| `event` | 事件正文，字段随事件类型而定，不做裁剪 |
+| `body` | 原始请求体（webhook）或原始帧（长连接） |
+| `eventId` | 2.0 的 `header.event_id`，1.0 的 `uuid`；用来做幂等 |
+| `token` | 应用校验 token；长连接上通常没有 |
+| `transport` | `webhook` / `socket` / `http` |
+| `version` | `1.0` / `2.0` |
+
+返回非 `undefined` 表示接管：HTTP 入口把返回值原样作为响应体（链接预览回调就是靠它回数据），长连接把它回传给飞书。返回 `undefined` 则继续走卡片回调 / 菜单 / 斜杠命令的默认分发。本地预览自己拼的卡片回调标记为 `synthetic`，不会进入事件处理函数。`readEvent(body)` 也从包入口导出，自己接传输层时可以直接用。
+
+```ts
 const handled = await app.handle(event);
 if (handled.type === 'card') return toCallbackResponse(handled);
 ```
 
 首次把卡片发到会话里：`const { card } = await app.render('/ticket/REQ-42')`，把 `card` 作为消息内容发出去。之后的点击由回调换成新的卡片 JSON。
+
+`listen()` 还接受 `onReady`，在 HTTP 监听和长连接就绪之后把装配好的 `app` 交出来；返回的清理函数会在 `close()` 时执行。用它挂自己的 OAuth 回调、定时任务或其它 HTTP 路由：
+
+```ts
+const running = await listen({
+  dir: process.cwd(),
+  onReady: (app) => {
+    const timer = setInterval(() => void pollExternal(app), 60_000);
+    return () => clearInterval(timer);
+  },
+});
+```
+
+自己接传输层时，`handle()` 之外这些能力也从包入口导出，不必再直接依赖 `@larksuiteoapi/node-sdk` 或重写一遍：`tenantAccessToken`、`resolveOpenApiBase`、`sendInteractiveCard`、`deliverMenuCard`、`envelopeFromSocket`、`envelopeHref` / `cardHref`、`readEnvelope`、`normalizeIncoming`、`decryptBody`。长连接的事件是摊平的，`envelopeFromSocket(eventType, data, header)` 会还原成 `handle()` 认的 `{ header, event }`，并保留 `token`、`tenant_key` 和 `event_id`。
+
+## 链接与侧边栏
+
+卡片按钮的 `url` 只写 `default_url`，PC 端会用系统浏览器打开，飞书 JSAPI 全部失效。要在 PC 客户端内嵌侧边栏里打开网页（例如外部 OAuth 回跳），用 `openLink()` 包一层：
+
+```tsx
+import { Button, openLink } from 'larklet/card';
+
+<Button url={openLink('https://bot.example/oauth/start')}>去授权</Button>;
+// https://applink.feishu.cn/client/web_url/open?mode=sidebar-semi&url=https%3A%2F%2Fbot.example%2Foauth%2Fstart
+```
+
+`mode` 可选 `sidebar-semi`（默认，侧边栏）、`window`（独立窗口）、`appCenter`（导航栏标签页，飞书 7.5+）；换窗口尺寸可传 `height` / `width` / `minWidth` / `maxWidth`。国际版传 `{ domain: 'lark' }` 用 `applink.larksuite.com`。`sidebar` 只属于「打开网页应用」（`web_app/open`），不能用在 `web_url/open` 上。
+
+同一模块还提供 `openChat()` 和 `openBot()`，在卡片里把用户带回某个会话：
+
+```tsx
+import { openChat, openBot } from 'larklet/card';
+
+<Button url={openChat({ openChatId: 'oc_...' })}>回到群聊</Button>;
+<Button url={openBot('cli_...')}>和机器人聊聊</Button>;
+```
+
+协议与参数见开放平台「AppLink 协议」下的「端内 web-view 访问指定 URL」「打开聊天页面」「打开机器人会话」。
 
 ## 发布
 

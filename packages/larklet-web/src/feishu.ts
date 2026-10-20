@@ -53,13 +53,18 @@ interface FeishuPayload {
   code?: number;
   msg?: string;
   tenant_access_token?: string;
-  app_access_token?: string;
   expire?: number;
+  /** OAuth v3 token 接口把字段放在顶层。 */
+  access_token?: string;
+  expires_in?: number;
+  error?: string;
+  error_description?: string;
   data?: {
     ticket?: string;
     expire_in?: number;
     message_id?: string;
     open_id?: string;
+    union_id?: string;
     name?: string;
     avatar_url?: string;
     access_token?: string;
@@ -86,6 +91,7 @@ export interface CardMessage {
 
 export interface FeishuUser {
   openId: string;
+  unionId?: string;
   name: string;
   avatarUrl: string;
   accessToken: string;
@@ -103,13 +109,14 @@ export class FeishuApi {
   readonly openApiBase: string;
   private readonly fetchImpl: typeof fetch;
   private tenant?: Cached;
-  private appToken?: Cached;
   private ticket?: Cached;
 
   constructor(private readonly opts: {
     appId: string;
     appSecret: string;
     openApiBase?: string;
+    /** OAuth 授权码换 token 的根地址；默认按开放平台域名推成 `accounts.<域名>`。 */
+    authBase?: string;
     fetchImpl?: typeof fetch;
   }) {
     this.openApiBase = resolveOpenApiBase(opts.openApiBase);
@@ -140,23 +147,35 @@ export class FeishuApi {
     return { appId: this.opts.appId, timestamp, nonceStr, signature };
   }
 
+  /**
+   * 用授权码换用户身份。走 OAuth 2.0 的 v3 token 接口（v1 / v2 都已标为历史版本），
+   * 再用拿到的 user_access_token 读 `authen/v1/user_info` 补齐 open_id / union_id / 头像。
+   */
   async exchangeAuthCode(code: string): Promise<FeishuUser> {
-    const appToken = await this.appAccessToken();
-    const data = await this.post(
-      '/open-apis/authen/v1/access_token',
-      { grant_type: 'authorization_code', code },
-      appToken,
+    const token = await this.postAbsolute(
+      this.authBase,
+      '/oauth/v3/token',
+      {
+        grant_type: 'authorization_code',
+        client_id: this.opts.appId,
+        client_secret: this.opts.appSecret,
+        code,
+      },
     );
-    const user = data.data;
-    if (data.code !== 0 || !user?.open_id || !user.access_token) {
-      throw new Error(`换取用户身份失败：${data.msg || data.code}`);
+    // 成功响应不带 `code`；只有错误响应才带。
+    if (!token.access_token || (token.code !== undefined && token.code !== 0)) {
+      throw new Error(`换取用户身份失败：${token.error_description || token.error || token.msg || token.code}`);
     }
+    const accessToken = token.access_token;
+    const expiresIn = token.expires_in ?? 7200;
+    const profile = await this.userProfile(accessToken).catch(() => undefined);
     return {
-      openId: user.open_id,
-      name: user.name ?? '',
-      avatarUrl: user.avatar_url ?? '',
-      accessToken: user.access_token,
-      expiresIn: user.expires_in ?? 7200,
+      openId: profile?.openId ?? '',
+      ...(profile?.unionId ? { unionId: profile.unionId } : {}),
+      name: profile?.name ?? '',
+      avatarUrl: profile?.avatarUrl ?? '',
+      accessToken,
+      expiresIn,
     };
   }
 
@@ -182,11 +201,16 @@ export class FeishuApi {
     };
   }
 
-  async userProfile(userAccessToken: string): Promise<{ openId: string; name: string }> {
+  async userProfile(userAccessToken: string): Promise<{ openId: string; unionId?: string; name: string; avatarUrl: string }> {
     const data = await this.get('/open-apis/authen/v1/user_info', userAccessToken);
     const openId = data.data?.open_id;
     if (data.code !== 0 || !openId) throw new Error(`读取用户身份失败：${data.msg || data.code}`);
-    return { openId, name: data.data?.name ?? '' };
+    return {
+      openId,
+      ...(data.data?.union_id ? { unionId: data.data.union_id } : {}),
+      name: data.data?.name ?? '',
+      avatarUrl: data.data?.avatar_url ?? '',
+    };
   }
 
   async uploadMessageImage(file: Blob, filename: string): Promise<string> {
@@ -254,19 +278,6 @@ export class FeishuApi {
     });
   }
 
-  private async appAccessToken(): Promise<string> {
-    return this.cached(this.appToken, async () => {
-      const data = await this.post('/open-apis/auth/v3/app_access_token/internal', {
-        app_id: this.opts.appId,
-        app_secret: this.opts.appSecret,
-      });
-      if (!data.app_access_token) throw new Error(`获取 app_access_token 失败：${data.msg || data.code}`);
-      const token = data.app_access_token;
-      this.appToken = this.remember(token, data.expire);
-      return token;
-    });
-  }
-
   private async cached(slot: Cached | undefined, load: () => Promise<string>): Promise<string> {
     if (slot && slot.expiresAt > Date.now()) return slot.value;
     return load();
@@ -275,6 +286,31 @@ export class FeishuApi {
   private remember(value: string, expireSeconds?: number): Cached {
     const ttl = Math.max((expireSeconds ?? 7200) - 60, 30);
     return { value, expiresAt: Date.now() + ttl * 1000 };
+  }
+
+  /**
+   * OAuth token 接口在 `accounts.<domain>` 上，不在 open-apis 下面。
+   * `open.feishu.cn` → `https://accounts.feishu.cn`；自定义根地址沿用其主机名。
+   */
+  private get authBase(): string {
+    const override = this.opts.authBase?.trim();
+    if (override) return override.replace(/\/+$/, '');
+    try {
+      const url = new URL(this.openApiBase);
+      const zone = url.hostname.split('.').slice(-2).join('.');
+      return `https://accounts.${zone}`;
+    } catch {
+      return 'https://accounts.feishu.cn';
+    }
+  }
+
+  private async postAbsolute(base: string, pathname: string, body: object): Promise<FeishuPayload> {
+    const response = await this.fetchImpl(`${base}${pathname}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+      body: JSON.stringify(body),
+    });
+    return readJson(response);
   }
 
   private async get(pathname: string, accessToken: string): Promise<FeishuPayload> {

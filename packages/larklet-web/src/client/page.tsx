@@ -130,8 +130,10 @@ function SendCard() {
         setConfig(cfg);
         await loadH5Sdk();
         if (cancelled) return;
-        const inside = Boolean(window.h5sdk && window.tt);
+        // h5-js-sdk 在任意浏览器都会赋值 window.tt / window.h5sdk，必须同时看 UA。
+        const inside = inFeishuClient() && Boolean(window.h5sdk && window.tt);
         setInFeishu(inside);
+        setOutsideFeishu(!inside);
         const params = new URLSearchParams(window.location.search);
         if (!inside) {
           setOutsideFeishu(true);
@@ -145,7 +147,17 @@ function SendCard() {
           const listed = await loadApps();
           if (cancelled) return;
           setApps(listed);
-          await configJsapi();
+          // UA 像飞书但实际在普通浏览器时，鉴权会失败：降级成外部环境，别整页报错。
+          const jsapiOk = await configJsapi().then(
+            () => true,
+            () => false,
+          );
+          if (cancelled) return;
+          if (!jsapiOk) {
+            setInFeishu(false);
+            setOutsideFeishu(true);
+            return;
+          }
           const triggerCode = readTriggerCode(params);
           if (!triggerCode) throw new Error('未拿到会话触发参数，请从聊天框的加号菜单进入。');
           const currentChat = await currentChatId(triggerCode);
@@ -156,7 +168,16 @@ function SendCard() {
           const listed = await loadApps();
           if (cancelled) return;
           setApps(listed);
-          await configJsapi();
+          // 鉴权失败说明并不真的在飞书里；应用列表已经拿到，降级即可。
+          const jsapiOk = await configJsapi().then(
+            () => true,
+            () => false,
+          );
+          if (cancelled) return;
+          if (!jsapiOk) {
+            setInFeishu(false);
+            setOutsideFeishu(true);
+          }
           return;
         }
         const directId = (params.get('message_id') || '').trim();
@@ -712,8 +733,9 @@ function inFeishuClient(): boolean {
 }
 
 function loadH5Sdk(): Promise<void> {
-  if (window.h5sdk && window.tt) return Promise.resolve();
+  // 不在飞书里就完全不加载：这段脚本会无条件往 window 上挂 tt / h5sdk，会让环境判定失真。
   if (!inFeishuClient()) return Promise.resolve();
+  if (window.h5sdk && window.tt) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const script = document.createElement('script');
     script.src = H5_SDK;

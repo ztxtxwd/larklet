@@ -3,7 +3,7 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 
 import type { FeishuCardJson } from '@open-feishu-card/components';
 
@@ -29,7 +29,7 @@ import {
 } from './preview-room.js';
 import { previewHtml } from './preview.js';
 import type { Operator } from './request.js';
-import { readEnvelope } from './state.js';
+import { cardHref } from './state.js';
 import { startFeishuSocket, type FeishuSocket } from './socket.js';
 
 export interface ListenOptions {
@@ -53,6 +53,12 @@ export interface ListenOptions {
    * 优先于用 app 凭证去飞书拉图；无 token、无 message 时靠这个看棋盘/卡图。
    */
   resolvePreviewImage?: ResolvePreviewImage;
+  /**
+   * HTTP 已监听、长连接客户端已构造后调用。参数是装配好的 `app`，可在
+   * 业务自己维护的 OAuth 回调、定时任务等入口里直接 `handle()` / `render()`。
+   * 返回的清理函数会在 `close()` 时先于服务器关闭执行。
+   */
+  onReady?: (app: LarkletApp) => Promise<(() => void) | void> | (() => void) | void;
 }
 
 export async function listen(options: ListenOptions = {}): Promise<{
@@ -91,19 +97,40 @@ export async function listen(options: ListenOptions = {}): Promise<{
     server.listen(port, host, () => resolve());
   });
 
-  const socket = openSocket(connection, app, options);
+  let socket: FeishuSocket | undefined;
+  let cleanup: (() => void) | undefined;
+  const shutdown = async (): Promise<void> => {
+    try {
+      cleanup?.();
+    } catch (error) {
+      console.warn('[larklet] onReady 清理失败：', error);
+    }
+    socket?.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  };
+
+  try {
+    socket = openSocket(connection, app, options);
+    const ready = await options.onReady?.(app);
+    if (typeof ready === 'function') cleanup = ready;
+  } catch (error) {
+    await shutdown();
+    throw error;
+  }
+
   const bound = server.address();
   const actualPort = typeof bound === 'object' && bound ? bound.port : port;
   const url = `http://127.0.0.1:${actualPort}`;
+  let closing: Promise<void> | undefined;
   return {
     url,
     app,
     connection,
-    close: () =>
-      new Promise((resolve, reject) => {
-        socket?.close();
-        server.close((error) => (error ? reject(error) : resolve()));
-      }),
+    // 重复调用返回同一个 Promise；第一次关闭后不会再向已关闭的 server 发请求。
+    close: () => {
+      closing ??= shutdown();
+      return closing;
+    },
   };
 }
 
@@ -175,9 +202,13 @@ async function routeRequest(app: LarkletApp, dev: boolean, dir: string, req: Inc
     const body = await readBody(req);
     const record = isRecord(body) ? body : {};
     const href = typeof record.href === 'string' && record.href.trim() ? record.href.trim() : '/';
+    const operator = readOperator(record.operator);
+    const message = readMessage(record.message);
     const rendered = await app.render(href, {
       userState: record.userState,
       searchParams: isRecord(record.searchParams) ? (record.searchParams as RenderInit['searchParams']) : undefined,
+      ...(operator ? { operator } : {}),
+      ...(message ? { message } : {}),
     });
     if (record.html !== true) {
       sendJson(res, 200, { card: rendered.card });
@@ -221,13 +252,19 @@ async function routeRequest(app: LarkletApp, dev: boolean, dir: string, req: Inc
     return;
   }
 
-  if (req.method === 'POST' && (url.pathname === '/' || url.pathname === '/webhook' || url.pathname === '/_larklet/event')) {
+  if (req.method === 'POST' && (url.pathname === '/webhook' || (dev && url.pathname === '/_larklet/event'))) {
     const body = await readBody(req);
     if (url.pathname === '/_larklet/event') {
       rememberPreviewPerson(operatorFromBody(body));
     }
+    const preview = url.pathname === '/_larklet/event';
     const handled = await app.handle(body, {
-      captureEphemeral: url.pathname === '/_larklet/event',
+      captureEphemeral: preview,
+      // 预览页自己构造事件，不经过飞书签名；只有 dev 下这个入口才开放。
+      trustedTransport: preview,
+      // 自己拼的卡片回调没有 event_id，不算飞书事件，不交给 onEvent / app/events.*。
+      synthetic: preview,
+      transport: preview ? 'http' : 'webhook',
     });
     if (handled.type === 'challenge') {
       sendJson(res, 200, { challenge: handled.challenge });
@@ -235,6 +272,10 @@ async function routeRequest(app: LarkletApp, dev: boolean, dir: string, req: Inc
     }
     if (handled.type === 'empty') {
       sendJson(res, 200, {});
+      return;
+    }
+    if (handled.type === 'raw') {
+      sendJson(res, 200, handled.response ?? {});
       return;
     }
     if (handled.type === 'menu') {
@@ -318,20 +359,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function cardHref(card: FeishuCardJson): string | undefined {
-  const envelope = readEnvelope(undefined, card);
-  if (!envelope) return undefined;
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(envelope.search)) {
-    if (typeof value === 'string') params.append(key, value);
-    else if (Array.isArray(value)) {
-      for (const item of value) params.append(key, item);
-    }
-  }
-  const query = params.toString();
-  return query ? `${envelope.pathname}?${query}` : envelope.pathname;
-}
-
 function renderInitFromSearch(params: URLSearchParams): RenderInit {
   const openId = params.get('open_id') || undefined;
   const operator: Operator | undefined = openId
@@ -348,6 +375,31 @@ function renderInitFromSearch(params: URLSearchParams): RenderInit {
   return {
     operator,
     message: { openMessageId, openChatId },
+  };
+}
+
+const OPERATOR_FIELDS = ['openId', 'userId', 'unionId', 'tenantKey', 'name', 'avatar'] as const;
+
+/** 渲染请求里可选的 `operator`。只收字符串字段，其余忽略。 */
+function readOperator(value: unknown): Operator | undefined {
+  if (!isRecord(value)) return undefined;
+  const operator: Operator = {};
+  for (const field of OPERATOR_FIELDS) {
+    const raw = value[field];
+    if (typeof raw === 'string' && raw.trim()) operator[field] = raw.trim();
+  }
+  return Object.keys(operator).length > 0 ? operator : undefined;
+}
+
+/** 渲染请求里可选的 `message`，只认这两个 message id。 */
+function readMessage(value: unknown): RenderInit['message'] | undefined {
+  if (!isRecord(value)) return undefined;
+  const openMessageId = typeof value.openMessageId === 'string' ? value.openMessageId.trim() : '';
+  const openChatId = typeof value.openChatId === 'string' ? value.openChatId.trim() : '';
+  if (!openMessageId && !openChatId) return undefined;
+  return {
+    ...(openMessageId ? { openMessageId } : {}),
+    ...(openChatId ? { openChatId } : {}),
   };
 }
 
@@ -569,6 +621,9 @@ function rendererEntry(): string {
   return pathToFileURL(entry).href;
 }
 
+/** `app/catalog.*`。`GET /_larklet/apps` 与配套网页的加号菜单都读它。 */
+const CATALOG_FILES = ['catalog.ts', 'catalog.tsx', 'catalog.jsx', 'catalog.js'] as const;
+
 function readRendererCss(): string {
   try {
     return fs.readFileSync(path.join(rendererPackageDir(), 'dist/all.css'), 'utf8');
@@ -609,8 +664,9 @@ function readBody(req: IncomingMessage): Promise<unknown> {
 }
 
 async function readAppCatalog(dir: string): Promise<Array<{ href: string; title: string; description: string; intro?: string }>> {
-  const file = path.join(dir, 'app', 'catalog.ts');
-  if (!fs.existsSync(file)) return [];
+  // 和页面一样接受 .tsx / .ts / .jsx / .js；同时存在多个时按这个顺序取第一个。
+  const file = CATALOG_FILES.map((name) => path.join(dir, 'app', name)).find((candidate) => fs.existsSync(candidate));
+  if (!file) return [];
   const stamp = fs.statSync(file).mtimeMs;
   const mod = (await import(`${pathToFileURL(file).href}?v=${stamp}`)) as { apps?: unknown };
   if (!Array.isArray(mod.apps)) return [];

@@ -39,6 +39,108 @@ export type Incoming =
   | { kind: 'menu'; menu: MenuEvent }
   | { kind: 'ignore' };
 
+export type LarkletEventTransport = 'webhook' | 'socket' | 'http';
+export type LarkletEventVersion = '1.0' | '2.0';
+
+/**
+ * 飞书推来的任意事件或回调，统一成这个形状。
+ * 2.0 事件直接用 `header`；1.0 的 `event_callback` 会补一个同形 header，
+ * 所以业务代码不用区分版本。
+ */
+export interface LarkletEvent {
+  /** 例如 `im.message.receive_v1`、`im.chat.member.user.added_v1`、`url.preview.get`。 */
+  eventType: string;
+  /** 2.0 的 `header`；1.0 事件由 `uuid` / `token` / `event.type` 拼出来。 */
+  header: Record<string, unknown>;
+  /** 事件正文。不同事件类型字段不同，原样交出。 */
+  event: Record<string, unknown>;
+  /** 原始请求体（webhook）或原始帧（长连接），保留未知字段。 */
+  body: unknown;
+  /**
+   * 2.0 是 `header.event_id`，1.0 是 `uuid`。飞书建议用它做幂等。
+   * 本地预览等自己拼的事件没有，所以可能缺省。
+   */
+  eventId?: string;
+  /** 应用校验 token；长连接上通常没有。 */
+  token?: string;
+  transport: LarkletEventTransport;
+  version: LarkletEventVersion;
+}
+
+/**
+ * 从回调体里读出一个事件。只认两种形状：
+ * - 2.0：`{ header: { event_type }, event }`
+ * - 1.0：`{ type: 'event_callback', uuid, token, event: { type } }`
+ *
+ * - 1.0：`{ type: 'event_callback', uuid, token, event: { type } }`
+ *
+ * `url_verification`、本地预览自己拼的事件（`synthetic`）不算业务事件。
+ */
+export function readEvent(
+  body: unknown,
+  options: { transport?: LarkletEventTransport; synthetic?: boolean } = {},
+): LarkletEvent | undefined {
+  if (options.synthetic || !isRecord(body)) return undefined;
+  const transport = options.transport ?? 'webhook';
+
+  // 2.0：header.event_type 决定类型。没有 event_id 的（本地预览、手写 body）
+  // 仍算事件，交给处理函数；飞书的真实推送一定带 event_id。
+  const header = isRecord(body.header) ? body.header : undefined;
+  if (header) {
+    const eventType = stringField(header, 'event_type')?.trim();
+    if (!eventType) return undefined;
+    const token = stringField(header, 'token') ?? stringField(body, 'token');
+    const eventId = stringField(header, 'event_id')?.trim() || legacyIdOf(body);
+    return {
+      eventType,
+      header,
+      event: isRecord(body.event) ? body.event : {},
+      body,
+      ...(eventId ? { eventId } : {}),
+      ...(token ? { token } : {}),
+      transport,
+      version: '2.0',
+    };
+  }
+
+  // 1.0：uuid 是事件唯一标识。大多数事件包在 event_callback 里、类型在 event.type；
+  // 机器人菜单等少量事件直接把类型放在顶层 type 上。没有 uuid 的多半是手写的 body。
+  if (!isRecord(body.event)) return undefined;
+  const eventId = legacyIdOf(body);
+  if (!eventId) return undefined;
+  const eventType =
+    body.type === 'event_callback'
+      ? stringField(body.event, 'type')?.trim()
+      : stringField(body, 'type')?.trim();
+  if (!eventType) return undefined;
+
+  const token = stringField(body, 'token');
+  const createTime = stringField(body, 'ts');
+  const tenantKey = stringField(body.event, 'tenant_key')?.trim() || undefined;
+  const legacyHeader: Record<string, unknown> = {
+    event_type: eventType,
+    event_id: eventId,
+    ...(token ? { token } : {}),
+    ...(createTime ? { create_time: createTime } : {}),
+    ...(tenantKey ? { tenant_key: tenantKey } : {}),
+  };
+  return {
+    eventType,
+    header: legacyHeader,
+    event: body.event,
+    body,
+    eventId,
+    ...(token ? { token } : {}),
+    transport,
+    version: '1.0',
+  };
+}
+
+/** 1.0 事件用 `uuid` 标识；没有时退回 `event_id`（部分自建通道会带）。 */
+function legacyIdOf(body: Record<string, unknown>): string | undefined {
+  return stringField(body, 'uuid')?.trim() || stringField(body, 'event_id')?.trim() || undefined;
+}
+
 export function decryptBody(body: unknown, encryptKey: string | undefined): unknown {
   if (!encryptKey || !isRecord(body) || typeof body.encrypt !== 'string') return body;
   const key = createHash('sha256').update(encryptKey).digest();

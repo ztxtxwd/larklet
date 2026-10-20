@@ -62,7 +62,8 @@ const running = await listen({
 console.log(`Larklet ${dev ? 'dev' : 'start'} ${running.url}`);
 if (dev) console.log(`预览 ${running.url}/`);
 if (running.connection === 'webhook') {
-  console.log(`webhook ${running.url}/webhook`);
+  // 本进程只监听本地端口；开发者后台填的公网地址由你自己反代过来。
+  console.log('webhook 路径 /webhook（对外地址在开放平台配置，指到本机的 /webhook）');
 } else if (running.app.appId) {
   console.log(`websocket ${running.app.appId}`);
 } else {

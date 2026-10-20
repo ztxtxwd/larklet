@@ -46,11 +46,11 @@ test('读取卡片并以机器人或用户身份发送', async () => {
     if (url.endsWith('/jssdk/ticket/get')) {
       return json({ code: 0, data: { ticket: 'ticket-1', expire_in: 7200 } });
     }
-    if (url.endsWith('/authen/v1/access_token')) {
-      return json({
-        code: 0,
-        data: { open_id: 'ou_1', name: 'Ada', avatar_url: '', access_token: 'user-token', expires_in: 100 },
-      });
+    if (url.endsWith('/oauth/v3/token')) {
+      return json({ code: 0, access_token: 'user-token', expires_in: 100 });
+    }
+    if (url.endsWith('/authen/v1/user_info')) {
+      return json({ code: 0, data: { open_id: 'ou_1', union_id: 'on_1', name: 'Ada', avatar_url: '' } });
     }
     if (url.includes('/im/v1/messages/om_1')) {
       return json({
@@ -109,7 +109,24 @@ test('读取卡片并以机器人或用户身份发送', async () => {
     method: 'POST',
     body: JSON.stringify({ code: 'auth-code' }),
   });
-  assert.equal((await authed.json() as { accessToken: string }).accessToken, 'user-token');
+  assert.deepEqual(await authed.json(), {
+    ok: true,
+    openId: 'ou_1',
+    unionId: 'on_1',
+    name: 'Ada',
+    avatarUrl: '',
+    accessToken: 'user-token',
+    expiresIn: 100,
+  });
+  const exchange = calls.find((call) => call.url.endsWith('/oauth/v3/token'));
+  assert.equal(exchange?.url, 'https://accounts.feishu.cn/oauth/v3/token');
+  assert.deepEqual(exchange?.body, {
+    grant_type: 'authorization_code',
+    client_id: 'cli_test',
+    client_secret: 'secret',
+    code: 'auth-code',
+  });
+  assert.equal(exchange?.authorization, undefined);
 
   const asUser = await app.request('/api/card/send', {
     method: 'POST',
@@ -194,7 +211,8 @@ test('发送时丢掉对局状态，只按应用路径重新开一张卡片', as
     }
     if (url.endsWith('/_larklet/render')) {
       const body = JSON.parse(String(init?.body)) as { href?: string; userState?: unknown; searchParams?: unknown };
-      assert.equal(body.href, '/framed');
+      // 查询串随路径一起还原；对局状态按设计丢弃。
+      assert.equal(body.href, '/framed?from=share');
       assert.equal(body.userState, undefined);
       assert.equal(body.searchParams, undefined);
       return json({ card: revived });

@@ -10,6 +10,8 @@ export interface CompanionOptions {
   appSecret?: string;
   /** `Feishu` / `Lark`，或完整的开放平台根地址。 */
   openApiBase?: string;
+  /** OAuth 授权码换 token 的根地址。默认按开放平台域名推成 `accounts.<域名>`。 */
+  authBase?: string;
   /** 开发时允许用 `?message_id=` 打开，不必从消息快捷应用进入。 */
   allowDirectMessageId?: boolean;
   /**
@@ -77,6 +79,7 @@ export function createCompanionApp(options: CompanionOptions = {}): Hono {
       appId,
       appSecret,
       openApiBase: options.openApiBase ?? process.env.LARK_DOMAIN,
+      authBase: options.authBase,
       fetchImpl: options.fetchImpl,
     });
     return client;
@@ -116,6 +119,7 @@ export function createCompanionApp(options: CompanionOptions = {}): Hono {
       return c.json({
         ok: true,
         openId: user.openId,
+        ...(user.unionId ? { unionId: user.unionId } : {}),
         name: user.name,
         avatarUrl: user.avatarUrl,
         accessToken: user.accessToken,
@@ -307,18 +311,33 @@ async function reviveLarkletCard(
 ): Promise<string> {
   if (!cardRenderUrl && !renderCard) return content;
   const card = JSON.parse(content) as unknown;
-  const envelope = larkletEnvelope(card);
-  if (!envelope) return content;
-  return renderFreshCard(envelope.pathname, cardRenderUrl, fetchImpl, renderCard);
+  const href = larkletHref(card);
+  if (!href) return content;
+  return renderFreshCard(href, cardRenderUrl, fetchImpl, renderCard);
 }
 
-function larkletEnvelope(card: unknown): { pathname: string } | null {
+/**
+ * 从封印状态里还原打开卡片的 `href`。查询串一并带上，卡片状态（如一局游戏）按设计不带：
+ * 转发出去的是「从这张卡片的页面重新打开」，不是复制那一刻的状态。
+ */
+function larkletHref(card: unknown): string | null {
   if (!card || typeof card !== 'object') return null;
   const sealed = readCardState(card as Record<string, unknown>);
   if (!sealed || typeof sealed !== 'object') return null;
   const record = sealed as Record<string, unknown>;
   if (record.v !== 1 || typeof record.pathname !== 'string' || typeof record.pattern !== 'string') return null;
-  return { pathname: record.pathname };
+  const params = new URLSearchParams();
+  const search = record.search;
+  if (search && typeof search === 'object' && !Array.isArray(search)) {
+    for (const [key, value] of Object.entries(search as Record<string, unknown>)) {
+      if (typeof value === 'string') params.append(key, value);
+      else if (Array.isArray(value)) {
+        for (const item of value) if (typeof item === 'string') params.append(key, item);
+      }
+    }
+  }
+  const query = params.toString();
+  return query ? `${record.pathname}?${query}` : record.pathname;
 }
 
 function fail(c: Context, error: string, status: 400 | 502 = 400) {

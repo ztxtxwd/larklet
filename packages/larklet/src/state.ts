@@ -1,4 +1,5 @@
 import { ACTION_ID_KEY } from '@open-feishu-card/components';
+import type { FeishuCardJson } from '@open-feishu-card/components';
 import { decodeStateUrl, encodeStateUrl, readCardState, sealCardState } from '@open-feishu-card/store';
 
 import type { LarkletStore, SearchParams } from './request.js';
@@ -66,6 +67,28 @@ export function readEnvelope(
     if (isEnvelope(sealed)) return sealed;
   }
   return null;
+}
+
+/** 把信封里的路径与查询串拼回 `href`，例如 `/item/42?from=home`。 */
+export function envelopeHref(envelope: LarkletEnvelope): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(envelope.search)) {
+    if (typeof value === 'string') params.append(key, value);
+    else if (Array.isArray(value)) {
+      for (const item of value) params.append(key, item);
+    }
+  }
+  const query = params.toString();
+  return query ? `${envelope.pathname}?${query}` : envelope.pathname;
+}
+
+/**
+ * 从一张已发出的卡片反推出打开它的 `href`（含查询串）。
+ * 卡片带有 `search` 时一并带上；需要从卡片 A 应用把用户送回 B 应用时用它。
+ */
+export function cardHref(card: FeishuCardJson): string | undefined {
+  const envelope = readEnvelope(undefined, card);
+  return envelope ? envelopeHref(envelope) : undefined;
 }
 
 function walk(
