@@ -177,3 +177,15 @@ if (handled.type === 'card') return toCallbackResponse(handled);
 ```
 
 首次把卡片发到会话里：`const { card } = await app.render('/ticket/REQ-42')`，把 `card` 作为消息内容发出去。之后的点击由回调换成新的卡片 JSON。
+
+## 发布
+
+`larklet`、`larklet-web`、`create-larklet` 同版本发布到 npm，由 GitHub Actions 用 OIDC trusted publishing 完成，仓库里不存 token。
+
+```bash
+pnpm release patch    # 0.1.0 -> 0.1.1
+pnpm release minor    # -> 0.2.0
+pnpm release 1.0.0    # 直接指定
+```
+
+脚本会先跑 typecheck 和测试，再把三个包的版本对齐、提交 `release: vX.Y.Z`、打 tag，确认后推送到 origin。`v*` tag 会触发 `.github/workflows/publish.yml`，按 `larklet`、`larklet-web`、`create-larklet` 的顺序发布。`--yes` 跳过确认；非交互环境只提交和打 tag，推送由人工完成。

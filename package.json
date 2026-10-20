@@ -7,7 +7,8 @@
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r --if-present typecheck",
     "create-larklet": "tsx packages/create-larklet/src/cli.ts",
-    "inbox": "tsx packages/larklet/src/cli.ts dev --dir examples/inbox --port 8787"
+    "inbox": "tsx packages/larklet/src/cli.ts dev --dir examples/inbox --port 8787",
+    "release": "node scripts/release.mjs"
   },
   "devDependencies": {
     "tsx": "^4.19.3",
