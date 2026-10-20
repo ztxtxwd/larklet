@@ -1,6 +1,6 @@
 {
   "name": "larklet-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Larklet 机器人的配套网页：飞书消息快捷应用里查看卡片，并以机器人或用户身份发送。",
   "type": "module",
   "exports": {
