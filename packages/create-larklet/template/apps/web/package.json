@@ -1,0 +1,34 @@
+{
+  "name": "@__APP_NAME__/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n api,web \"pnpm dev:api\" \"pnpm dev:web\"",
+    "dev:api": "tsx watch src/server.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "NODE_ENV=production tsx src/server.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@douyinfe/semi-ui": "^2.104.0",
+    "@hono/node-server": "^1.19.0",
+    "larklet-web": "__LARKLET_WEB_SPEC__",
+    "hono": "^4.9.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@douyinfe/semi-vite-plugin": "^2.104.0",
+    "@semi-bot/semi-theme-universedesign": "^1.0.13",
+    "@types/node": "^22.20.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.4.1",
+    "concurrently": "^9.1.2",
+    "sass": "^1.86.3",
+    "tsx": "^4.19.3",
+    "typescript": "^5.9.3",
+    "vite": "^6.3.5"
+  }
+}

@@ -6,3 +6,5 @@ dist
 .env
 .pnpm-store
 next.js
+
+.omc

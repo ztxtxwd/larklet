@@ -1,0 +1,59 @@
+{
+  "name": "larklet-web",
+  "version": "0.1.0",
+  "description": "Larklet 机器人的配套网页：飞书消息快捷应用里查看卡片，并以机器人或用户身份发送。",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/server.ts",
+      "import": "./src/server.ts",
+      "require": "./src/server.ts",
+      "default": "./src/server.ts"
+    },
+    "./client": {
+      "types": "./src/client/index.ts",
+      "import": "./src/client/index.ts",
+      "require": "./src/client/index.ts",
+      "default": "./src/client/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@open-feishu-card/adapter": "^0.3.18",
+    "@open-feishu-card/store": "^0.1.2",
+    "hono": "^4.9.6"
+  },
+  "peerDependencies": {
+    "@douyinfe/semi-ui": "^2.70.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3",
+    "@douyinfe/semi-ui": "^2.104.0",
+    "@types/node": "^22.20.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ztxtxwd/larklet.git",
+    "directory": "packages/larklet-web"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "create-larklet",
+  "version": "0.1.0",
+  "description": "创建同时包含 Larklet 机器人与配套网页的 pnpm workspace。",
+  "type": "module",
+  "bin": {
+    "create-larklet": "./bin/create-larklet.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "template"
+  ],
+  "scripts": {
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "tsx": "^4.19.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ztxtxwd/larklet.git",
+    "directory": "packages/create-larklet"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

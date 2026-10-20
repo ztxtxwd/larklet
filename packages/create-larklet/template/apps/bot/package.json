@@ -1,0 +1,17 @@
+{
+  "name": "@__APP_NAME__/bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=../../.env --env-file-if-exists=.env ./node_modules/larklet/bin/larklet.js dev --dir . --port 8787",
+    "start": "node --env-file-if-exists=../../.env --env-file-if-exists=.env ./node_modules/larklet/bin/larklet.js start --dir . --port 8787",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "larklet": "__LARKLET_SPEC__"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  }
+}

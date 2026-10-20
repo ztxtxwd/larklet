@@ -1,5 +1,5 @@
-import { Button, Column, ColumnSet, Hr, Markdown, bindAction } from 'flick/card';
-import { getCardState, redirect, setCardState, toast } from 'flick';
+import { Button, Column, ColumnSet, Hr, Markdown, bindAction } from 'larklet/card';
+import { getCardState, redirect, setCardState, toast } from 'larklet';
 
 import { CHANNELS, ROLES, guideStep, type AppState, type GuideState, type GuideStep } from '../state.js';
 

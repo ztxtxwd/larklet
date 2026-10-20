@@ -1,0 +1,66 @@
+{
+  "name": "larklet",
+  "version": "0.1.0",
+  "description": "飞书交互卡片的服务端渲染框架。文件路由、Server Action、webhook / 长连接，心智模型对齐 Next.js App Router。",
+  "type": "module",
+  "bin": {
+    "larklet": "./bin/larklet.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "require": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./card": {
+      "types": "./src/card.ts",
+      "import": "./src/card.ts",
+      "require": "./src/card.ts",
+      "default": "./src/card.ts"
+    },
+    "./jsx-runtime": {
+      "types": "./src/jsx-runtime.ts",
+      "import": "./src/jsx-runtime.ts",
+      "require": "./src/jsx-runtime.ts",
+      "default": "./src/jsx-runtime.ts"
+    },
+    "./jsx-dev-runtime": {
+      "types": "./src/jsx-dev-runtime.ts",
+      "import": "./src/jsx-dev-runtime.ts",
+      "require": "./src/jsx-dev-runtime.ts",
+      "default": "./src/jsx-dev-runtime.ts"
+    }
+  },
+  "files": [
+    "src",
+    "bin"
+  ],
+  "scripts": {
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.74.0",
+    "@open-feishu-card/components": "^0.1.4",
+    "@open-feishu-card/store": "^0.1.2",
+    "@open-feishu-card/renderer": "^0.2.32",
+    "tsx": "^4.19.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ztxtxwd/larklet.git",
+    "directory": "packages/larklet"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

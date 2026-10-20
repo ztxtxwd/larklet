@@ -1,5 +1,5 @@
-import { Button, Form, Input, Markdown, bindAction } from 'flick/card';
-import { formValue, getCardState, notFound, redirect, setCardState, toast } from 'flick';
+import { Button, Form, Input, Markdown, bindAction } from 'larklet/card';
+import { formValue, getCardState, notFound, redirect, setCardState, toast } from 'larklet';
 
 import type { AppState } from '../../state.js';
 import { findTicket } from '../../tickets.js';

@@ -1,0 +1,16 @@
+{
+  "name": "larklet-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "create-larklet": "tsx packages/create-larklet/src/cli.ts",
+    "inbox": "tsx packages/larklet/src/cli.ts dev --dir examples/inbox --port 8787"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3",
+    "typescript": "^5.9.3"
+  }
+}

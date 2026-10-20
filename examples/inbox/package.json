@@ -1,0 +1,16 @@
+{
+  "name": "inbox",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "larklet dev --dir . --port 8787",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "larklet": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  }
+}

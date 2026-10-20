@@ -1,0 +1,13 @@
+{
+  "name": "__APP_NAME__",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @__APP_NAME__/bot dev",
+    "dev:web": "pnpm --filter @__APP_NAME__/web dev",
+    "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
