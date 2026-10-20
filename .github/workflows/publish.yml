@@ -1,0 +1,50 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm -r --if-present typecheck
+
+      - run: pnpm test
+
+      # OIDC trusted publishing 需要 npm 11.5.1+，setup-node 自带的版本可能偏旧
+      - run: npm install -g npm@11
+
+      # 用 npm publish 而不是 pnpm publish：只有 npm CLI 支持 --provenance 和 OIDC 换票
+      - name: Publish larklet
+        working-directory: packages/larklet
+        run: npm publish --provenance --access public
+
+      - name: Publish larklet-web
+        working-directory: packages/larklet-web
+        run: npm publish --provenance --access public
+
+      # 最后发 create-larklet：它生成的工程依赖前两个包
+      - name: Publish create-larklet
+        working-directory: packages/create-larklet
+        run: npm publish --provenance --access public
