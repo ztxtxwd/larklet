@@ -1,7 +1,7 @@
 import type { FeishuCardJson } from '@open-feishu-card/components';
 
 import { LarkletError } from './app.js';
-import type { Operator } from './request.js';
+import { readStore, type Operator } from './request.js';
 
 const DEFAULT_OPEN_API = 'https://open.feishu.cn';
 
@@ -31,6 +31,11 @@ interface TokenCache {
 const tokens = new Map<string, TokenCache>();
 
 export type ReceiveIdType = 'open_id' | 'chat_id';
+
+/** 收件人 id 的前缀决定类型：`oc_` 是会话，其余按 open_id。 */
+function inferReceiveIdType(receiveId: string): ReceiveIdType {
+  return receiveId.startsWith('oc_') ? 'chat_id' : 'open_id';
+}
 
 /** 把渲染好的卡片作为交互消息发出。菜单 / 斜杠命令没有卡片回传体，这是对应的响应。 */
 export async function sendInteractiveCard(
@@ -69,7 +74,7 @@ export async function postInteractiveCard(opts: {
   openApiBase?: string;
 }): Promise<{ messageId: string }> {
   const base = resolveOpenApiBase(opts.openApiBase);
-  const receiveIdType = opts.receiveIdType ?? (opts.receiveId.startsWith('oc_') ? 'chat_id' : 'open_id');
+  const receiveIdType = opts.receiveIdType ?? inferReceiveIdType(opts.receiveId);
   const response = await fetch(`${base}/open-apis/im/v1/messages?receive_id_type=${receiveIdType}`, {
     method: 'POST',
     headers: {
@@ -88,6 +93,83 @@ export async function postInteractiveCard(opts: {
     throw new LarkletError(`发送卡片失败：${payload.msg || payload.code}`, 502);
   }
   return { messageId };
+}
+
+/** 发一条纯文本消息，返回飞书 `message_id`。收件人按前缀判定，`oc_` 开头是会话。 */
+export async function postText(opts: {
+  accessToken: string;
+  receiveId: string;
+  text: string;
+  receiveIdType?: ReceiveIdType;
+  openApiBase?: string;
+}): Promise<{ messageId: string }> {
+  const base = resolveOpenApiBase(opts.openApiBase);
+  const receiveIdType = opts.receiveIdType ?? inferReceiveIdType(opts.receiveId);
+  const response = await fetch(`${base}/open-apis/im/v1/messages?receive_id_type=${receiveIdType}`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${opts.accessToken}`,
+      'content-type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({
+      receive_id: opts.receiveId,
+      msg_type: 'text',
+      content: JSON.stringify({ text: opts.text }),
+    }),
+  });
+  const payload = await readFeishu(response);
+  const messageId = payload.data?.message_id;
+  if (payload.code !== 0 || !messageId) {
+    throw new LarkletError(`发送文本失败：${payload.msg || payload.code}`, 502);
+  }
+  return { messageId };
+}
+
+export interface SendTextOptions {
+  /** 凭证，默认取当前卡片上下文，再退回 `LARKLET_APP_ID` / `LARKLET_APP_SECRET`（也认 `APP_ID` / `APP_SECRET`）。 */
+  appId?: string;
+  appSecret?: string;
+  /** 默认按收件人 id 前缀判断：`oc_` 是 `chat_id`，其余是 `open_id`。 */
+  receiveIdType?: ReceiveIdType;
+  /** 覆盖开放平台域名，例如 Lark 的 `https://open.larksuite.com`。 */
+  openApiBase?: string;
+}
+
+/**
+ * 收到事件后回一句话：直接发文本到会话或用户。
+ *
+ * ```ts
+ * // open_id 私聊给提问的人，chat_id 发到群
+ * await sendText(message.chat_id as string, '收到，马上处理');
+ * ```
+ *
+ * 与 `sendCard` 不同，它不要求运行在 Server Action 里，`app/events.ts` 的事件处理函数也能直接调用。
+ */
+export async function sendText(
+  receiveIdOrChatId: string,
+  text: string,
+  options: SendTextOptions = {},
+): Promise<{ messageId: string }> {
+  const receiveId = receiveIdOrChatId.trim();
+  if (!receiveId) throw new Error('sendText 需要 open_id 或 chat_id');
+  if (!text.trim()) throw new Error('sendText 需要非空文本');
+
+  const store = readStore();
+  const appId = options.appId?.trim() || store?.appId || process.env.LARKLET_APP_ID || process.env.APP_ID;
+  const appSecret =
+    options.appSecret?.trim() || store?.appSecret || process.env.LARKLET_APP_SECRET || process.env.APP_SECRET;
+  if (!appId || !appSecret) {
+    throw new LarkletError('发送文本需要配置 app_id 与 app_secret', 400);
+  }
+
+  const accessToken = await tenantAccessToken(appId, appSecret, options.openApiBase);
+  return postText({
+    accessToken,
+    receiveId,
+    text,
+    receiveIdType: options.receiveIdType,
+    openApiBase: options.openApiBase,
+  });
 }
 
 /** 用卡片 JSON 更新一条已发出的消息。 */

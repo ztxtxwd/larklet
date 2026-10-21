@@ -223,6 +223,26 @@ const handled = await app.handle(event);
 if (handled.type === 'card') return toCallbackResponse(handled);
 ```
 
+### 回一句话
+
+事件处理函数里最常做的是回一条消息。`sendText(receiveIdOrChatId, text)` 收 `open_id` 或 `chat_id`，按 `oc_` 前缀自动选 `receive_id_type`，凭证用当前上下文或 `LARKLET_APP_ID` / `LARKLET_APP_SECRET`，不用自己取 token、拼 `im/v1/messages`：
+
+```ts
+// app/events.ts
+import { sendText } from 'larklet';
+
+export const events = {
+  'im.message.receive_v1': async (event) => {
+    const message = event.event.message as { chat_id: string; content: string };
+    const { text } = JSON.parse(message.content) as { text: string };
+    await sendText(message.chat_id, `收到：${text}`);
+    return { code: 0 };
+  },
+};
+```
+
+需要自己拿 token 时用 `postText({ accessToken, receiveId, text })`，参数和 `postInteractiveCard` 一致。两个函数都返回 `{ messageId }`。
+
 首次把卡片发到会话里：`const { card } = await app.render('/ticket/REQ-42')`，把 `card` 作为消息内容发出去。之后的点击由回调换成新的卡片 JSON。
 
 `listen()` 还接受 `onReady`，在 HTTP 监听和长连接就绪之后把装配好的 `app` 交出来；返回的清理函数会在 `close()` 时执行。用它挂自己的 OAuth 回调、定时任务或其它 HTTP 路由：
@@ -237,7 +257,7 @@ const running = await listen({
 });
 ```
 
-自己接传输层时，`handle()` 之外这些能力也从包入口导出，不必再直接依赖 `@larksuiteoapi/node-sdk` 或重写一遍：`tenantAccessToken`、`resolveOpenApiBase`、`sendInteractiveCard`、`deliverMenuCard`、`envelopeFromSocket`、`envelopeHref` / `cardHref`、`readEnvelope`、`normalizeIncoming`、`decryptBody`。长连接的事件是摊平的，`envelopeFromSocket(eventType, data, header)` 会还原成 `handle()` 认的 `{ header, event }`，并保留 `token`、`tenant_key` 和 `event_id`。
+自己接传输层时，`handle()` 之外这些能力也从包入口导出，不必再直接依赖 `@larksuiteoapi/node-sdk` 或重写一遍：`tenantAccessToken`、`resolveOpenApiBase`、`sendInteractiveCard`、`postInteractiveCard`、`sendText`、`postText`、`deliverMenuCard`、`envelopeFromSocket`、`envelopeHref` / `cardHref`、`readEnvelope`、`normalizeIncoming`、`decryptBody`。长连接的事件是摊平的，`envelopeFromSocket(eventType, data, header)` 会还原成 `handle()` 认的 `{ header, event }`，并保留 `token`、`tenant_key` 和 `event_id`。
 
 ## 链接与侧边栏
 

@@ -45,12 +45,14 @@ export {
   EphemeralSendError,
   patchInteractiveCard,
   postInteractiveCard,
+  postText,
   resolveOpenApiBase,
   sendEphemeralCard,
   sendInteractiveCard,
+  sendText,
   tenantAccessToken,
 } from './feishu.js';
-export type { ReceiveIdType } from './feishu.js';
+export type { ReceiveIdType, SendTextOptions } from './feishu.js';
 
 export { envelopeFromSocket, replyToSocket, startFeishuSocket } from './socket.js';
 export type { FeishuSocket } from './socket.js';
