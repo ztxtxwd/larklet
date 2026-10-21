@@ -1,6 +1,6 @@
 {
   "name": "create-larklet",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "创建同时包含 Larklet 机器人与配套网页的 pnpm workspace。",
   "type": "module",
   "bin": {
