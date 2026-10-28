@@ -35,6 +35,12 @@ test('生成包含 bot 与 web 的 workspace', () => {
     const vite = fs.readFileSync(path.join(created.dest, 'apps/web/vite.config.ts'), 'utf8');
     assert.match(vite, /@semi-bot\/semi-theme-universedesign/);
     assert.match(fs.readFileSync(path.join(created.dest, '.gitignore'), 'utf8'), /node_modules/);
+
+    const mcp = JSON.parse(fs.readFileSync(path.join(created.dest, '.mcp.json'), 'utf8')) as {
+      mcpServers: Record<string, { command: string; args: string[] }>;
+    };
+    assert.equal(mcp.mcpServers['feishu-doc'].command, 'npx');
+    assert.deepEqual(mcp.mcpServers['feishu-doc'].args, ['feishu-doc-mcp@latest']);
   } finally {
     fs.rmSync(dest, { recursive: true, force: true });
   }

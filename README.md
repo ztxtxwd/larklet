@@ -172,6 +172,8 @@ pnpm dev:web
 
 生成工程里的 `larklet` 与 `larklet-web` 取 npm 上的版本，版本号跟随 `create-larklet` 自己。飞书后台把消息快捷操作的地址指到 web；应用需要读取消息、以应用身份发消息，并让用户授权 `im:message` 与 `im:message.send_as_user`。
 
+工程根目录还带一份 `.mcp.json`，注册 `feishu-doc` MCP（`npx feishu-doc-mcp@latest`），方便 Claude Code 查飞书开放平台文档。
+
 用户身份走 OAuth 2.0 的 `POST https://accounts.feishu.cn/oauth/v3/token`（旧的 `authen/v1/access_token`、`authen/v2/oauth/token` 都已是历史版本），再用 `user_access_token` 调 `authen/v1/user_info` 取 `open_id` / `union_id` / 姓名和头像。国际版把开放平台域名设成 `Lark` 或 `https://open.larksuite.com`，账号域名随之变成 `accounts.larksuite.com`。
 
 网页在浏览器里的飞书环境判定会同时看 UA 和 H5 SDK：`h5-js-sdk` 在任意浏览器都会给 `window.tt` / `window.h5sdk` 赋值，只看全局对象会把普通浏览器误判成飞书。JSSDK 鉴权失败时会降级成本地预览，而不是整页报错。从消息回读卡片再转发时，会按封印状态还原路径和查询串（`/framed?from=share`），卡片里的 `cardState`（例如一局游戏）按设计不复制。

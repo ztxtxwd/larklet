@@ -8,3 +8,6 @@ dist
 next.js
 
 .omc
+
+# 仓库根的 .mcp.json 是本机配置，不入库；模板里的那份要跟着 create-larklet 发布
+!packages/create-larklet/template/.mcp.json
