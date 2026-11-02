@@ -51,7 +51,21 @@
     "@open-feishu-card/renderer": "^0.2.32",
     "tsx": "^4.19.3"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.3",
+    "@earendil-works/pi-ai": "^0.84.3"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.3",
+    "@earendil-works/pi-ai": "^0.84.3",
     "@types/node": "^22.20.1",
     "typescript": "^5.9.3"
   },

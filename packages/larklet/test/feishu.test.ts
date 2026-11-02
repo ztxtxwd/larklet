@@ -1,61 +1,10 @@
 import assert from 'node:assert/strict';
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 
 import { LarkletError } from '../src/app.js';
 import { postText, sendText } from '../src/feishu.js';
 import { larkletStorage, type LarkletStore } from '../src/request.js';
-
-interface Call {
-  url: string;
-  body: unknown;
-}
-
-/** 本地假开放平台：发 token，记下每次 /im/v1/messages 的请求。 */
-async function fakeOpenApi(): Promise<{ base: string; calls: Call[]; close: () => Promise<void> }> {
-  const calls: Call[] = [];
-  const server: Server = createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8');
-      const url = req.url ?? '';
-      if (url.startsWith('/open-apis/auth/v3/tenant_access_token/internal')) {
-        res.end(JSON.stringify({ code: 0, msg: 'ok', tenant_access_token: 't_token', expire: 7200 }));
-        return;
-      }
-      if (url.startsWith('/open-apis/im/v1/messages')) {
-        calls.push({ url, body: raw ? (JSON.parse(raw) as unknown) : undefined });
-        res.end(JSON.stringify({ code: 0, msg: 'ok', data: { message_id: `om_${calls.length}` } }));
-        return;
-      }
-      res.statusCode = 404;
-      res.end(JSON.stringify({ code: 404, msg: 'not found' }));
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address() as AddressInfo;
-  return {
-    base: `http://127.0.0.1:${port}`,
-    calls,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
-  };
-}
-
-function withEnv<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
-  const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
-  for (const [key, value] of Object.entries(env)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  return fn().finally(() => {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  });
-}
+import { fakeOpenApi, withEnv } from './helpers/fake-open-api.js';
 
 test('sendText 按前缀选 receive_id_type，并用环境变量凭证', async () => {
   const api = await fakeOpenApi();

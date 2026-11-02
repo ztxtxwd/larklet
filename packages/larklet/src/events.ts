@@ -232,6 +232,16 @@ function readMenu(
 }
 
 /**
+ * 这条消息是不是斜杠命令（正文以 `/` 开头）。
+ *
+ * 斜杠命令属于「已配置路由」，对话 Agent 不接管。判定与 `readSlashCommand` 共用同一份逻辑，
+ * 免得两处各写一套、慢慢漂移。
+ */
+export function isSlashCommand(event: LarkletEvent): boolean {
+  return slashEventKey(event.event) !== undefined;
+}
+
+/**
  * 用户发给机器人的文本若以 `/` 开头（群聊里可先 @bot），把斜杠后的内容当作菜单 `event_key`。
  * 例如私聊 `/guide`、群聊 `@机器人 /guide` 与点击 event_key 为 `guide` 的菜单等价。
  */

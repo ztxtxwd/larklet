@@ -3,13 +3,16 @@ import path from 'node:path';
 import { ACTION_ID_KEY, ACTION_PARAMS_KEY, getRegisteredAction } from '@open-feishu-card/components';
 import type { FeishuCardJson } from '@open-feishu-card/components';
 
-import { decryptBody, normalizeIncoming, readEvent, type CardAction, type LarkletEvent, type MenuEvent } from './events.js';
+import { decryptBody, isSlashCommand, normalizeIncoming, readEvent, type CardAction, type LarkletEvent, type MenuEvent } from './events.js';
 import {
   handlersForEvent,
   loadEventHandlers,
   type LarkletEventHandler,
   type LarkletEventHandlers,
 } from './event-handlers.js';
+import { loadAgentConfig } from './agent/config.js';
+import { loadAgentRunner } from './agent/loader.js';
+import type { AgentHandle, AgentRunner, ResolvedAgentConfig } from './agent/types.js';
 import { isNotFoundError, isRedirectError } from './navigation.js';
 import { renderCard, type RenderedCard } from './render.js';
 import {
@@ -126,6 +129,10 @@ export interface LarkletApp {
   readonly appId?: string;
   /** 已配置的飞书 App Secret。 */
   readonly appSecret?: string;
+  /**
+   * 对话 Agent 的句柄。没写 `app/agent.ts` 时它是个空壳：`idle()` 立刻 resolve。
+   */
+  readonly agent: AgentHandle;
   render(href?: string, init?: RenderInit): Promise<RenderedCard>;
   handle(body: unknown, options?: HandleOptions): Promise<LarkletHandled>;
   /** 开发预览用。页面导出 `previewScene` 时返回它。 */
@@ -141,10 +148,44 @@ export async function createLarklet(options: CreateLarkletOptions = {}): Promise
   const inlineHandlers = normalizeOnEvent(options.onEvent);
   let fileHandlers = await loadEventHandlers(appDir);
 
+  // `app/agent.ts` 存在时才有对话 Agent。没写的话行为和以前完全一样。
+  let agentConfig: ResolvedAgentConfig | undefined;
+  let agentRunner: AgentRunner | undefined;
+  const agentHandle: AgentHandle = {
+    idle: () => agentRunner?.idle() ?? Promise.resolve(),
+  };
+
   async function currentRoutes(): Promise<Route[]> {
     if (!options.dev) return routes;
     routes = await loadRoutes(appDir);
     return routes;
+  }
+
+  /**
+   * 取当前这份配置对应的 Agent。配置没改就复用同一个实例 ——
+   * 换实例会丢掉在跑的轮次。
+   */
+  async function currentAgent(): Promise<AgentRunner | undefined> {
+    const config = await loadAgentConfig(appDir);
+    if (!config) return undefined;
+    if (agentRunner && agentConfig === config) return agentRunner;
+    agentConfig = config;
+    agentRunner = await loadAgentRunner(config, { appId, appSecret });
+    return agentRunner;
+  }
+
+  /**
+   * 没命中任何路由的消息交给 Agent。
+   *
+   * 斜杠命令不算：它属于已配置的路由。Agent 接管后立刻回执，
+   * 模型那一轮在后台跑 —— 飞书的事件回执不能等模型。
+   */
+  async function dispatchAgent(event: LarkletEvent): Promise<boolean> {
+    if (event.eventType !== 'im.message.receive_v1') return false;
+    if (isSlashCommand(event)) return false;
+    const runner = await currentAgent();
+    if (!runner) return false;
+    return runner.handle(event);
   }
 
   async function dispatchEvent(event: LarkletEvent): Promise<unknown> {
@@ -198,6 +239,10 @@ export async function createLarklet(options: CreateLarkletOptions = {}): Promise
       assertToken(event.token);
       const response = await dispatchEvent(event);
       if (response !== undefined) return { type: 'raw', eventType: event.eventType, response };
+      // 事件处理函数都没接管的话，没命中路由的消息交给对话 Agent。
+      if (await dispatchAgent(event)) {
+        return { type: 'raw', eventType: event.eventType, response: { code: 0 } };
+      }
     }
 
     const incoming = normalizeIncoming(decoded);
@@ -249,7 +294,7 @@ export async function createLarklet(options: CreateLarkletOptions = {}): Promise
     return matchRoute(active, parsed.pathname)?.route.previewScene;
   }
 
-  return { dir, appId, appSecret, render, handle, previewScene };
+  return { dir, appId, appSecret, render, handle, previewScene, agent: agentHandle };
 }
 
 /** 飞书回调要求的响应体。`leaveCard` 时不带 card，客户端保持原卡片。 */

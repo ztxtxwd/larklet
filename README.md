@@ -220,6 +220,8 @@ export const events = {
 
 返回非 `undefined` 表示接管：HTTP 入口把返回值原样作为响应体（链接预览回调就是靠它回数据），长连接把它回传给飞书。返回 `undefined` 则继续走卡片回调 / 菜单 / 斜杠命令的默认分发。本地预览自己拼的卡片回调标记为 `synthetic`，不会进入事件处理函数。`readEvent(body)` 也从包入口导出，自己接传输层时可以直接用。
 
+事件处理函数都没接管时，`im.message.receive_v1` 里没命中路由的消息会交给[对话 Agent](#对话-agent)（应用写了 `app/agent.ts` 才有）。
+
 ```ts
 const handled = await app.handle(event);
 if (handled.type === 'card') return toCallbackResponse(handled);
@@ -260,6 +262,92 @@ const running = await listen({
 ```
 
 自己接传输层时，`handle()` 之外这些能力也从包入口导出，不必再直接依赖 `@larksuiteoapi/node-sdk` 或重写一遍：`tenantAccessToken`、`resolveOpenApiBase`、`sendInteractiveCard`、`postInteractiveCard`、`sendText`、`postText`、`deliverMenuCard`、`envelopeFromSocket`、`envelopeHref` / `cardHref`、`readEnvelope`、`normalizeIncoming`、`decryptBody`。长连接的事件是摊平的，`envelopeFromSocket(eventType, data, header)` 会还原成 `handle()` 认的 `{ header, event }`，并保留 `token`、`tenant_key` 和 `event_id`。
+
+## 对话 Agent
+
+机器人默认只回「已配置路由」的消息：机器人菜单、斜杠命令 `/guide`。用户私聊发一句「今天怎么样」，没有任何路由命中，消息会被丢掉。
+
+写了 `app/agent.ts` 之后，没命中路由的消息交给对话 Agent 应答：
+
+```ts
+// app/agent.ts
+import { defineAgent } from 'larklet';
+
+export const agent = defineAgent({
+  systemPrompt: '你是订单助手，回答简短。',
+  requireMention: true,   // 群里必须 @ 机器人才回。私聊不受影响
+  historyLimit: 30,       // 每次回复带多少条历史
+  staleThresholdMs: 300_000, // 过期的事件不处理
+});
+```
+
+模型的接口走 OpenAI 兼容协议，配置在 `.env`：
+
+```
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=
+LLM_MODEL=gpt-4.1-mini
+```
+
+也认 `LARKLET_LLM_BASE_URL` / `LARKLET_LLM_API_KEY` / `LARKLET_LLM_MODEL`，优先于上面这组。
+
+模型运行时是 `@earendil-works/pi-agent-core` 与 `@earendil-works/pi-ai`。它们是 larklet 的**可选依赖**：应用自己装上这两个包，larklet 只在真的存在 `app/agent.ts` 时才加载它们。`create-larklet <目录> --agent` 会一并把依赖、`app/agent.ts` 和 `.env.example` 里的模型配置生成好。
+
+### 消息怎么走
+
+| 顺序 | 谁处理 |
+| --- | --- |
+| 1 | `app/events.ts` 里注册的事件处理函数。返回非 `undefined` 就到此为止 |
+| 2 | 对话 Agent。只接 `im.message.receive_v1`，且正文不是斜杠命令 |
+| 3 | 默认分发：斜杠命令走菜单路由，卡片回调走对应页面 |
+
+Agent 接管后会立刻回执 `{ code: 0 }`，模型那一轮在后台跑 —— 飞书的事件回执不能等模型。
+
+一轮里发生的事：
+
+- 同一会话同时只跑一轮。新消息到了，上一轮中止，不再发消息。
+- 给用户那条消息点一个 `OnIt` 表情表示处理中，结束或被中止时摘掉。
+- 拼提示词：最近的历史（`im/v1/messages` 拉的，只取当前这条之前的）+ 当前消息。
+- 模型通过 `reply_text` 工具回话，内容是纯文本。模型没调工具但吐了纯文本，就把那段发出去；两者都没有，回一句「抱歉，刚刚处理消息时出了点问题，请稍后再试。」。
+
+机器人自己发的、别的机器人发的、超过 `staleThresholdMs` 的消息都不进模型。私聊直接回，群里要 @ 机器人。
+
+`app.agent.idle()` 等所有在跑的轮次结束。`listen()` 关闭时会先等它，免得回复发不出去。
+
+### 开放平台权限
+
+订阅 `im.message.receive_v1`，并开通：
+
+- 读取用户发给机器人的单聊消息
+- 读取用户在群组中 @ 机器人的消息
+- 以应用身份发消息
+- 获取单聊、群聊的历史消息（用来带上下文）
+- 消息表情回复（处理中那个 `OnIt`，没开也不影响回话）
+
+### 自己加工具
+
+除了内置的 `reply_text`，可以给模型更多工具。工具结构与 `@earendil-works/pi-agent-core` 的 `AgentTool` 一致：
+
+```ts
+import { defineAgent } from 'larklet';
+import { Type } from '@earendil-works/pi-ai';
+
+export const agent = defineAgent({
+  systemPrompt: '你是订单助手。',
+  tools: [
+    {
+      name: '查订单',
+      label: '查订单',
+      description: '按订单号查订单状态。',
+      parameters: Type.Object({ id: Type.String({ description: '订单号' }) }),
+      execute: async (_id, params) => {
+        const { id } = params as { id: string };
+        return { content: [{ type: 'text', text: await lookup(id) }], details: {} };
+      },
+    },
+  ],
+});
+```
 
 ## 链接与侧边栏
 

@@ -45,3 +45,31 @@ test('生成包含 bot 与 web 的 workspace', () => {
     fs.rmSync(dest, { recursive: true, force: true });
   }
 });
+
+test('带 --agent 时生成对话 Agent 与模型配置', () => {
+  const dest = path.join(here, '../.tmp-scaffold-agent');
+  fs.rmSync(dest, { recursive: true, force: true });
+  try {
+    const created = scaffold(path.join(dest, 'Inbox Demo'), { agent: true });
+
+    const agent = fs.readFileSync(path.join(created.dest, 'apps/bot/app/agent.ts'), 'utf8');
+    assert.match(agent, /defineAgent/);
+    assert.match(agent, /inbox-demo/);
+
+    const bot = JSON.parse(fs.readFileSync(path.join(created.dest, 'apps/bot/package.json'), 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+    assert.match(bot.dependencies['@earendil-works/pi-agent-core'], /^\^0\./);
+    assert.match(bot.dependencies['@earendil-works/pi-ai'], /^\^0\./);
+
+    const env = fs.readFileSync(path.join(created.dest, '.env.example'), 'utf8');
+    assert.match(env, /LLM_BASE_URL=/);
+    assert.match(env, /LLM_API_KEY=/);
+    assert.match(env, /LLM_MODEL=/);
+
+    // 模板里的 agent 素材不该被当成工程的一部分拷进去。
+    assert.equal(fs.existsSync(path.join(created.dest, 'agent')), false);
+  } finally {
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});

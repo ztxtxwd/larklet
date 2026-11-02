@@ -39,20 +39,31 @@ export { sendCard, updateCard } from './messages.js';
 export type { SendCardInit, UpdateCardInit } from './messages.js';
 
 export {
+  addMessageReaction,
   deleteEphemeralCard,
   deliverMenuCard,
   EphemeralDeleteError,
   EphemeralSendError,
+  getBotIdentity,
+  listChatMessages,
   patchInteractiveCard,
   postInteractiveCard,
   postText,
+  removeMessageReaction,
   resolveOpenApiBase,
   sendEphemeralCard,
   sendInteractiveCard,
   sendText,
   tenantAccessToken,
 } from './feishu.js';
-export type { ReceiveIdType, SendTextOptions } from './feishu.js';
+export type { ChatMessageItem, ReceiveIdType, SendTextOptions } from './feishu.js';
+
+export { defaultSystemPrompt, defineAgent } from './agent/types.js';
+export type {
+  AgentHandle,
+  LarkletAgentConfig,
+  LarkletAgentTool,
+} from './agent/types.js';
 
 export { envelopeFromSocket, replyToSocket, startFeishuSocket } from './socket.js';
 export type { FeishuSocket } from './socket.js';
@@ -68,7 +79,7 @@ export {
 } from './state.js';
 export type { InteractiveControl, LarkletEnvelope } from './state.js';
 
-export { decryptBody, normalizeIncoming, readEvent } from './events.js';
+export { decryptBody, isSlashCommand, normalizeIncoming, readEvent } from './events.js';
 export type {
   CardAction,
   Incoming,

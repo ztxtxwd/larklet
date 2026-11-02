@@ -172,6 +172,120 @@ export async function sendText(
   });
 }
 
+/** 会话历史里的一条消息。字段按飞书 `im.v1.message.list` 的返回裁剪。 */
+export interface ChatMessageItem {
+  message_id?: string;
+  msg_type?: string;
+  body?: { content?: string };
+  mentions?: Array<{ key?: string; name?: string }>;
+  sender?: { sender_type?: string };
+  /** 毫秒时间戳。 */
+  create_time?: string;
+  deleted?: boolean;
+}
+
+/**
+ * 拉会话历史消息。按时间倒序返回，调用方要正序的话自己排。
+ * `beforeMs` 之前的，`page_size` 上限 50。
+ */
+export async function listChatMessages(opts: {
+  accessToken: string;
+  chatId: string;
+  /** 只取这个时间（毫秒）之前的。 */
+  beforeMs?: number;
+  limit?: number;
+  openApiBase?: string;
+}): Promise<ChatMessageItem[]> {
+  const base = resolveOpenApiBase(opts.openApiBase);
+  const params = new URLSearchParams({
+    container_id_type: 'chat',
+    container_id: opts.chatId,
+    sort_type: 'ByCreateTimeDesc',
+    page_size: String(Math.min(50, Math.max(1, opts.limit ?? 30))),
+  });
+  if (opts.beforeMs !== undefined && Number.isFinite(opts.beforeMs)) {
+    params.set('end_time', String(Math.floor(opts.beforeMs / 1000)));
+  }
+  const response = await fetch(`${base}/open-apis/im/v1/messages?${params.toString()}`, {
+    method: 'GET',
+    headers: { authorization: `Bearer ${opts.accessToken}` },
+  });
+  const payload = await readFeishu(response);
+  if (payload.code !== 0) {
+    throw new LarkletError(`获取历史消息失败：${payload.msg || payload.code}`, 502);
+  }
+  return (payload.data?.items ?? []) as ChatMessageItem[];
+}
+
+/**
+ * 机器人自己的身份。`open_id` 用来认出「群里 @ 的是不是我」和「这条消息是不是我发的」。
+ */
+export async function getBotIdentity(opts: {
+  accessToken: string;
+  openApiBase?: string;
+}): Promise<{ openId?: string; appName?: string }> {
+  const base = resolveOpenApiBase(opts.openApiBase);
+  const response = await fetch(`${base}/open-apis/bot/v3/info`, {
+    method: 'GET',
+    headers: { authorization: `Bearer ${opts.accessToken}` },
+  });
+  const payload = await readFeishu(response);
+  if (payload.code !== 0) {
+    throw new LarkletError(`获取机器人信息失败：${payload.msg || payload.code}`, 502);
+  }
+  // bot/v3/info 把 bot 放在顶层，不在 data 里。
+  const bot = payload.bot ?? {};
+  return {
+    openId: typeof bot.open_id === 'string' ? bot.open_id : undefined,
+    appName: typeof bot.app_name === 'string' ? bot.app_name : undefined,
+  };
+}
+
+/** 给一条消息加表情回复，例如处理中的 `OnIt`。返回表情 id。 */
+export async function addMessageReaction(opts: {
+  accessToken: string;
+  messageId: string;
+  emojiType?: string;
+  openApiBase?: string;
+}): Promise<{ reactionId?: string }> {
+  const base = resolveOpenApiBase(opts.openApiBase);
+  const response = await fetch(`${base}/open-apis/im/v1/messages/${opts.messageId}/reactions`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${opts.accessToken}`,
+      'content-type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({ reaction_type: { emoji_type: opts.emojiType ?? 'OnIt' } }),
+  });
+  const payload = await readFeishu(response);
+  const reactionId = payload.data?.reaction_id;
+  if (payload.code !== 0) {
+    throw new LarkletError(`添加表情回复失败：${payload.msg || payload.code}`, 502);
+  }
+  return { reactionId: typeof reactionId === 'string' ? reactionId : undefined };
+}
+
+/** 摘掉一条消息上的表情回复。 */
+export async function removeMessageReaction(opts: {
+  accessToken: string;
+  messageId: string;
+  reactionId: string;
+  openApiBase?: string;
+}): Promise<void> {
+  const base = resolveOpenApiBase(opts.openApiBase);
+  const response = await fetch(
+    `${base}/open-apis/im/v1/messages/${opts.messageId}/reactions/${opts.reactionId}`,
+    {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${opts.accessToken}` },
+    },
+  );
+  const payload = await readFeishu(response);
+  if (payload.code !== 0) {
+    throw new LarkletError(`删除表情回复失败：${payload.msg || payload.code}`, 502);
+  }
+}
+
 /** 用卡片 JSON 更新一条已发出的消息。 */
 export async function patchInteractiveCard(opts: {
   accessToken: string;
@@ -317,12 +431,29 @@ async function readFeishu(response: Response): Promise<{
   msg?: string;
   tenant_access_token?: string;
   expire?: number;
-  data?: { message_id?: string };
+  /** bot/v3/info 把机器人信息放在顶层。 */
+  bot?: { open_id?: string; app_name?: string };
+  data?: {
+    message_id?: string;
+    reaction_id?: string;
+    items?: ChatMessageItem[];
+  };
 }> {
   const text = await response.text();
   if (!text) return { code: response.ok ? 0 : response.status, msg: response.statusText };
   try {
-    return JSON.parse(text) as { code?: number; msg?: string; tenant_access_token?: string; expire?: number };
+    return JSON.parse(text) as {
+      code?: number;
+      msg?: string;
+      tenant_access_token?: string;
+      expire?: number;
+      bot?: { open_id?: string; app_name?: string };
+      data?: {
+        message_id?: string;
+        reaction_id?: string;
+        items?: ChatMessageItem[];
+      };
+    };
   } catch {
     throw new LarkletError(`飞书接口返回的不是 JSON：${response.status}`, 502);
   }

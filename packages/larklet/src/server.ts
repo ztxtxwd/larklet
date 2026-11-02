@@ -105,6 +105,8 @@ export async function listen(options: ListenOptions = {}): Promise<{
     } catch (error) {
       console.warn('[larklet] onReady 清理失败：', error);
     }
+    // 等对话 Agent 把在跑的轮次发完，别把回复丢了。
+    await app.agent.idle();
     socket?.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   };
