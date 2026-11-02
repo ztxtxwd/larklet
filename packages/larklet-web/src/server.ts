@@ -163,8 +163,12 @@ export function createCompanionApp(options: CompanionOptions = {}): Hono {
     const body = await readBody(c.req.raw);
     const href = stringField(body, 'href');
     const chatId = stringField(body, 'chatId');
+    const as = stringField(body, 'as') || 'bot';
+    const userAccessToken = stringField(body, 'userAccessToken');
     if (!href.startsWith('/') || href.startsWith('//')) return fail(c, '应用路径不正确');
     if (!chatId) return fail(c, '缺少当前会话');
+    if (as !== 'bot' && as !== 'user') return fail(c, 'as 需要是 bot 或 user');
+    if (as === 'user' && !userAccessToken) return fail(c, '缺少用户授权，请先授权后重试');
     if (!renderCard && !cardRenderUrl) return fail(c, '未配置卡片渲染地址');
     try {
       if (!renderCard) {
@@ -174,7 +178,11 @@ export function createCompanionApp(options: CompanionOptions = {}): Hono {
         if (!apps.some((item) => item.href === href)) return fail(c, '没有这个应用');
       }
       const rendered = await renderFreshCard(href, cardRenderUrl, fetchImpl, renderCard);
-      const sent = await api().sendCard({ chatId, content: rendered });
+      const sent = await api().sendCard({
+        chatId,
+        content: rendered,
+        accessToken: as === 'user' ? userAccessToken : undefined,
+      });
       return c.json({ ok: true, messageId: sent.messageId });
     } catch (error) {
       const message = messageOf(error);

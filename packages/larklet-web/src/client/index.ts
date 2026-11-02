@@ -1,2 +1,2 @@
-export { CompanionPage, SendDropdown, registerAppDetail } from './page.js';
-export type { AppDetailContext } from './page.js';
+export { CompanionPage, SendMenu, registerAppDetail } from './page.js';
+export type { AppDetailContext, SendAs, SendMenuProps, SendTarget } from './page.js';

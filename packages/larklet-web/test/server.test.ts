@@ -240,11 +240,11 @@ test('发送时丢掉对局状态，只按应用路径重新开一张卡片', as
 });
 
 test('加号菜单按应用路径把新卡片发到当前会话', async () => {
-  const calls: Array<{ url: string; body?: unknown }> = [];
+  const calls: Array<{ url: string; body?: unknown; authorization?: string }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : undefined;
-    calls.push({ url, body });
+    calls.push({ url, body, authorization: new Headers(init?.headers).get('authorization') ?? undefined });
     if (url.endsWith('/_larklet/apps')) {
       return json({
         apps: [
@@ -293,6 +293,28 @@ test('加号菜单按应用路径把新卡片发到当前会话', async () => {
   const send = calls.find((call) => call.url.includes('/im/v1/messages?'));
   assert.deepEqual(send?.body, {
     receive_id: 'oc_1',
+    msg_type: 'interactive',
+    content: JSON.stringify({ schema: '2.0', header: { title: { content: '猜词' } } }),
+  });
+  // 不传 as 时仍按机器人身份发送。
+  assert.equal(send?.authorization, 'Bearer tenant-token');
+
+  const missingToken = await app.request('/api/apps/send', {
+    method: 'POST',
+    body: JSON.stringify({ href: '/semantle', chatId: 'oc_1', as: 'user' }),
+  });
+  assert.equal(missingToken.status, 400);
+  assert.deepEqual(await missingToken.json(), { ok: false, error: '缺少用户授权，请先授权后重试' });
+
+  const asUser = await app.request('/api/apps/send', {
+    method: 'POST',
+    body: JSON.stringify({ href: '/semantle', chatId: 'oc_2', as: 'user', userAccessToken: 'user-token' }),
+  });
+  assert.deepEqual(await asUser.json(), { ok: true, messageId: 'om_app' });
+  const userSend = calls.filter((call) => call.url.includes('/im/v1/messages?')).at(-1);
+  assert.equal(userSend?.authorization, 'Bearer user-token');
+  assert.deepEqual(userSend?.body, {
+    receive_id: 'oc_2',
     msg_type: 'interactive',
     content: JSON.stringify({ schema: '2.0', header: { title: { content: '猜词' } } }),
   });

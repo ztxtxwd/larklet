@@ -34,6 +34,11 @@ interface ListedApp {
   intro?: string;
 }
 
+/** 以谁的身份发送：用户本人，或机器人。 */
+export type SendAs = 'user' | 'bot';
+/** 发到哪里：当前打开本页的会话，或让用户再选一个。 */
+export type SendTarget = 'current' | 'picked';
+
 export interface AppDetailContext {
   app: ListedApp;
   chatId: string;
@@ -42,7 +47,9 @@ export interface AppDetailContext {
   /** 浏览器直接打开、并且配置了 Larklet 预览地址。发送走模拟群，不打飞书。 */
   preview: boolean;
   /** 弹出飞书选会话。用户取消时返回 null。 */
-  chooseTargetChat: () => Promise<{ chatId: string; name: string } | null>;
+  chooseTargetChat: (confirmText?: string) => Promise<{ chatId: string; name: string } | null>;
+  /** 以当前用户身份发送需要的 user_access_token。必要时会弹出授权。 */
+  requestUserToken: () => Promise<string>;
 }
 
 interface AppDetailRegistration {
@@ -104,7 +111,6 @@ function SendCard() {
   const [apps, setApps] = useState<ListedApp[] | null>(null);
   const [chatId, setChatId] = useState('');
   const [sendingHref, setSendingHref] = useState('');
-  const [sendingChatHref, setSendingChatHref] = useState('');
   const [introHref, setIntroHref] = useState(() => new URLSearchParams(window.location.search).get('app') || '');
   const fromPlus = isPlusMenu(new URLSearchParams(window.location.search));
 
@@ -225,19 +231,53 @@ function SendCard() {
     openIntro(about);
   }
 
-  async function sendApp(app: ListedApp) {
+  async function sendApp(app: ListedApp, as: SendAs, target: SendTarget) {
     if (sendingHref) return;
-    if (!simulate && !chatId) {
+    if (simulate) {
+      if (as !== 'bot' || target !== 'current') return;
+      setSendingHref(app.href);
+      try {
+        const result = await getJson<{ ok: boolean; error?: string }>('/api/preview/deliver', {
+          href: app.href,
+          kind: 'chat',
+        });
+        if (!result.ok) throw new Error(result.error || '发送失败');
+        Toast.success(`已把「${app.title}」发到模拟群`);
+      } catch (err) {
+        Toast.error(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSendingHref('');
+      }
+      return;
+    }
+    if (!inFeishu) {
       Toast.error('请从飞书聊天框的加号菜单打开后再发送');
       return;
     }
     setSendingHref(app.href);
     try {
-      const result = simulate
-        ? await getJson<{ ok: boolean; error?: string }>('/api/preview/deliver', { href: app.href, kind: 'chat' })
-        : await getJson<{ ok: boolean; error?: string }>('/api/apps/send', { href: app.href, chatId });
+      let targetChat = chatId;
+      let targetName = '';
+      if (target === 'picked') {
+        const chat = await chooseChat(as === 'user' ? '以我的身份发送' : '以机器人身份发送');
+        if (!chat) return;
+        targetChat = chat.chatId;
+        targetName = chat.name;
+      }
+      if (!targetChat) {
+        Toast.error('请从飞书聊天框的加号菜单打开后再发送');
+        return;
+      }
+      const userAccessToken = as === 'user' ? await ensureUserToken(config?.appId ?? '', userAuth, setUserAuth) : undefined;
+      const result = await getJson<{ ok: boolean; error?: string }>('/api/apps/send', {
+        href: app.href,
+        chatId: targetChat,
+        as,
+        ...(userAccessToken ? { userAccessToken } : {}),
+      });
       if (!result.ok) throw new Error(result.error || '发送失败');
-      Toast.success(simulate ? `已把「${app.title}」发到模拟群` : `已把「${app.title}」发到当前会话`);
+      const where = targetName ? `「${targetName}」` : '当前会话';
+      Toast.success(`${as === 'user' ? '已以我的身份' : '已以机器人身份'}把「${app.title}」发到${where}`);
     } catch (err) {
       Toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -245,34 +285,16 @@ function SendCard() {
     }
   }
 
-  async function sendAppToChat(app: ListedApp) {
-    if (sendingChatHref) return;
-    if (!inFeishu || !window.tt?.chooseChat) {
-      Toast.error('请在飞书客户端内选择会话');
-      return;
-    }
-    setSendingChatHref(app.href);
-    try {
-      const chat = await chooseChat('发送');
-      if (!chat) return;
-      const result = await getJson<{ ok: boolean; error?: string }>('/api/apps/send', {
-        href: app.href,
-        chatId: chat.chatId,
-      });
-      if (!result.ok) throw new Error(result.error || '发送失败');
-      Toast.success(`已把「${app.title}」发到「${chat.name || '会话'}」`);
-    } catch (err) {
-      Toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSendingChatHref('');
-    }
-  }
-
-  function chooseTargetChat(): Promise<{ chatId: string; name: string } | null> {
+  function chooseTargetChat(confirmText = '发送'): Promise<{ chatId: string; name: string } | null> {
     if (!inFeishu || !window.tt?.chooseChat) {
       return Promise.reject(new Error('请在飞书客户端内选择会话'));
     }
-    return chooseChat('发送');
+    return chooseChat(confirmText);
+  }
+
+  function requestUserToken(): Promise<string> {
+    if (!inFeishu) return Promise.reject(new Error('请在飞书客户端内授权'));
+    return ensureUserToken(config?.appId ?? '', userAuth, setUserAuth);
   }
 
   async function send(as: 'bot' | 'user') {
@@ -380,15 +402,19 @@ function SendCard() {
                 inFeishu,
                 preview: simulate,
                 chooseTargetChat,
+                requestUserToken,
               })}
             </>
           ) : null}
           {currentApp && !registered ? (
             <AppIntro
               app={currentApp}
-              sending={sendingHref === currentApp.href || sendingChatHref === currentApp.href}
-              onCurrent={() => void sendApp(currentApp)}
-              onPicked={() => void sendAppToChat(currentApp)}
+              sending={sendingHref === currentApp.href}
+              disabled={!simulate && !inFeishu}
+              allowUser={!simulate && inFeishu}
+              allowCurrent={simulate || Boolean(chatId)}
+              allowPicked={!simulate && inFeishu}
+              onSend={(as, target) => void sendApp(currentApp, as, target)}
             />
           ) : null}
           {listedApps && !currentApp ? (
@@ -406,29 +432,33 @@ function SendCard() {
                 <span className="app-pick-title">{app.title}</span>
                 {app.description ? <span className="app-pick-desc">{app.description}</span> : null}
               </span>
-              <Button
-                className="app-pick-send"
-                theme="outline"
-                type="primary"
-                size="small"
-                icon={<SendIcon />}
-                loading={sendingHref === app.href}
-                disabled={
-                  registeredDetail(app.href)
-                    ? false
-                    : (!simulate && !chatId) || (sendingHref !== '' && sendingHref !== app.href)
-                }
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (registeredDetail(app.href)) {
+              {registeredDetail(app.href) ? (
+                <Button
+                  className="app-pick-send"
+                  theme="outline"
+                  type="primary"
+                  size="small"
+                  icon={<SendIcon />}
+                  onClick={(event) => {
+                    event.stopPropagation();
                     openIntro(app);
-                    return;
-                  }
-                  void sendApp(app);
-                }}
-              >
-                {registeredDetail(app.href) ? '发布' : '发送'}
-              </Button>
+                  }}
+                >
+                  发布
+                </Button>
+              ) : (
+                <SendMenu
+                  className="app-pick-send"
+                  size="small"
+                  type="primary"
+                  loading={sendingHref === app.href}
+                  disabled={(!simulate && !inFeishu) || (sendingHref !== '' && sendingHref !== app.href)}
+                  allowUser={!simulate && inFeishu}
+                  allowCurrent={simulate || Boolean(chatId)}
+                  allowPicked={!simulate && inFeishu}
+                  onSend={(as, target) => void sendApp(app, as, target)}
+                />
+              )}
             </div>
           ))}
               {listedApps.length === 0 ? <Empty description="还没有可发送的应用" /> : null}
@@ -514,13 +544,19 @@ function SendIcon() {
 function AppIntro({
   app,
   sending,
-  onCurrent,
-  onPicked,
+  disabled,
+  allowUser,
+  allowCurrent,
+  allowPicked,
+  onSend,
 }: {
   app?: ListedApp;
   sending?: boolean;
-  onCurrent?: () => void;
-  onPicked?: () => void;
+  disabled?: boolean;
+  allowUser?: boolean;
+  allowCurrent?: boolean;
+  allowPicked?: boolean;
+  onSend?: (as: SendAs, target: SendTarget) => void;
 }) {
   const paragraphs = (app?.intro || app?.description || '').split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
   return (
@@ -529,41 +565,80 @@ function AppIntro({
       {paragraphs.map((paragraph) => (
         <p key={paragraph}>{paragraph}</p>
       ))}
-      {app && onCurrent && onPicked ? (
-        <SendDropdown loading={sending} onCurrent={onCurrent} onPicked={onPicked} />
+      {app && onSend ? (
+        <SendMenu
+          loading={sending}
+          disabled={disabled}
+          allowUser={allowUser}
+          allowCurrent={allowCurrent}
+          allowPicked={allowPicked}
+          onSend={onSend}
+        />
       ) : null}
     </article>
   );
 }
 
-export function SendDropdown({
-  loading,
-  disabled,
-  onCurrent,
-  onPicked,
-}: {
+export interface SendMenuProps {
   loading?: boolean;
   disabled?: boolean;
-  onCurrent: () => void;
-  onPicked: () => void;
-}) {
+  /** 本地预览没有飞书身份，不能以用户身份发送。 */
+  allowUser?: boolean;
+  /** 不在从加号菜单打开的会话里时，没有「本会话」可发。 */
+  allowCurrent?: boolean;
+  /** 本地预览不能选其他会话。 */
+  allowPicked?: boolean;
+  size?: 'small' | 'default';
+  type?: 'primary' | 'tertiary';
+  className?: string;
+  onSend: (as: SendAs, target: SendTarget) => void;
+}
+
+/** 每个应用的发送按钮：身份（用户 / 机器人）与会话（本会话 / 指定会话）各二选一。 */
+export function SendMenu({
+  loading,
+  disabled,
+  allowUser = true,
+  allowCurrent = true,
+  allowPicked = true,
+  size = 'default',
+  type = 'tertiary',
+  className,
+  onSend,
+}: SendMenuProps) {
+  const blocked = Boolean(disabled || loading);
   return (
     <Dropdown
-      trigger="hover"
+      trigger="click"
       position="topLeft"
       render={
         <Dropdown.Menu>
-          <Dropdown.Item disabled={disabled || loading} onClick={onCurrent}>
-            本会话
+          <Dropdown.Item disabled={blocked || !allowUser || !allowCurrent} onClick={() => onSend('user', 'current')}>
+            以用户身份发送到本会话
           </Dropdown.Item>
-          <Dropdown.Item disabled={disabled || loading} onClick={onPicked}>
-            指定会话
+          <Dropdown.Item disabled={blocked || !allowUser || !allowPicked} onClick={() => onSend('user', 'picked')}>
+            以用户身份发送到指定会话
+          </Dropdown.Item>
+          <Dropdown.Divider />
+          <Dropdown.Item disabled={blocked || !allowCurrent} onClick={() => onSend('bot', 'current')}>
+            以机器人身份发送到本会话
+          </Dropdown.Item>
+          <Dropdown.Item disabled={blocked || !allowPicked} onClick={() => onSend('bot', 'picked')}>
+            以机器人身份发送到指定会话
           </Dropdown.Item>
         </Dropdown.Menu>
       }
     >
       <span className="app-send-menu">
-        <Button theme="outline" type="tertiary" icon={<SendIcon />} loading={loading} disabled={disabled}>
+        <Button
+          className={className}
+          theme="outline"
+          type={type}
+          size={size}
+          icon={<SendIcon />}
+          loading={loading}
+          disabled={disabled}
+        >
           发送
         </Button>
       </span>
@@ -654,6 +729,9 @@ const APP_PICK_STYLE = `
 }
 .app-pick-send {
   align-self: flex-start;
+}
+.app-pick .app-send-menu {
+  margin-top: 0;
 }
 .app-pick-send.semi-button-outline:not(.semi-button-disabled) {
   color: var(--semi-color-primary);
