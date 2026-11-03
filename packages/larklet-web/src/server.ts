@@ -1,4 +1,3 @@
-import { readCardState } from '@open-feishu-card/store';
 import { Hono, type Context } from 'hono';
 
 import { FeishuApi } from './feishu.js';
@@ -15,12 +14,24 @@ export interface CompanionOptions {
   /** 开发时允许用 `?message_id=` 打开，不必从消息快捷应用进入。 */
   allowDirectMessageId?: boolean;
   /**
-   * Larklet 进程根地址。飞书回读会丢掉按钮回调。
-   * 发送时只取来源卡片的应用路径，向该地址渲染一张没有对局状态的新卡片。
+   * Larklet 进程根地址。加号菜单发卡时按应用路径向该地址渲染一张新卡片。
    */
   cardRenderUrl?: string;
-  /** 页面标题，默认「发送卡片」。 */
+  /** 页面标题，默认「飞书应用」。 */
   title?: string;
+  /**
+   * 读消息时申请的权限（用户身份）。默认只要 `im:message`。
+   *
+   * 机器人在消息所在的会话里时，网页会先用机器人身份读，不需要用户授权；
+   * 只有机器人读不到（机器人不在群里），才用用户身份读，这时才要这份权限。
+   * 要在群里以用户身份读，还要开 `im:message.group_msg:get_as_user`
+   * （单聊是 `im:message.p2p_msg:get_as_user`），并写进这里。
+   */
+  scopes?: string[];
+  /**
+   * 以用户身份发消息时申请的权限。默认 `im:message` 与 `im:message.send_as_user`。
+   */
+  sendScopes?: string[];
   /**
    * 开发时 Larklet 预览根地址。浏览器不在飞书里时，配套页用它嵌模拟群。
    * 生产环境不要设置。
@@ -33,7 +44,7 @@ export interface CompanionOptions {
   localPreview?: boolean;
   fetchImpl?: typeof fetch;
   /**
-   * 由网页自己渲染卡片。设置后，加号菜单发卡和回读后重开卡片都不再请求渲染服务。
+   * 由网页自己渲染卡片。设置后，加号菜单发卡不再请求渲染服务。
    * 未知路径应拒绝，错误信息为「没有这个应用」。
    */
   renderCard?: (href: string) => Promise<string>;
@@ -48,17 +59,19 @@ export interface CompanionOptions {
  * - `GET /api/config`
  * - `POST /api/jsapi-signature`
  * - `POST /api/auth/callback` 用 `requestAccess` 的 code 换用户身份
- * - `POST /api/card` 读取来源卡片
- * - `POST /api/card/send` 发到 `chooseChat` 选中的会话，`as` 为 `bot` 或 `user`
+ * - `POST /api/message` 读来源消息的类型。先用机器人身份读，机器人读不到才用用户身份
  *
- * 从聊天框加号菜单打开时没有来源消息。页面改走：
+ * 从聊天框加号菜单打开时没有来源消息，当前会话由页面用 JSAPI
+ * `getTriggerContext` 直接读，不用经过这里。页面另外会读：
  *
  * - `GET /api/apps` 读取 Larklet 的 `/_larklet/apps`
  * - `POST /api/apps/send` 按应用路径渲染一张新卡片，发到当前会话
  */
 export function createCompanionApp(options: CompanionOptions = {}): Hono {
   const app = new Hono();
-  const title = options.title?.trim() || '发送卡片';
+  const title = options.title?.trim() || '飞书应用';
+  const scopes = options.scopes ?? ['im:message'];
+  const sendScopes = options.sendScopes ?? ['im:message', 'im:message.send_as_user'];
   const allowDirectMessageId = options.allowDirectMessageId === true;
   const cardRenderUrl = (options.cardRenderUrl ?? process.env.LARKLET_CARD_RENDER_URL ?? '').replace(/\/+$/, '');
   const previewUrl = (options.previewUrl ?? '').replace(/\/+$/, '');
@@ -92,6 +105,8 @@ export function createCompanionApp(options: CompanionOptions = {}): Hono {
       appId,
       allowDirectMessageId,
       title,
+      scopes,
+      sendScopes,
       ...(previewUrl ? { previewUrl } : {}),
       ...(localPreview ? { localPreview: true } : {}),
     });
@@ -130,20 +145,26 @@ export function createCompanionApp(options: CompanionOptions = {}): Hono {
     }
   });
 
-  app.post('/api/card', async (c) => {
+  app.post('/api/message', async (c) => {
     const body = await readBody(c.req.raw);
     const messageId = stringField(body, 'messageId');
+    const userAccessToken = stringField(body, 'userAccessToken');
     if (!messageId) return fail(c, '缺少 messageId');
     try {
-      const card = await api().cardMessage(messageId);
+      // 没给用户身份就用机器人身份读：机器人在这条消息的会话里时，
+      // 不用麻烦用户授权就能读到消息类型。
+      const token = userAccessToken || (await api().tenantAccessToken());
+      const message = await api().messageInfo(messageId, token);
       return c.json({
         ok: true,
-        messageId: card.messageId,
-        msgType: card.msgType,
-        title: card.title ?? '',
+        messageId: message.messageId,
+        msgType: message.msgType,
       });
     } catch (error) {
-      return fail(c, messageOf(error), 502);
+      const text = messageOf(error);
+      // 机器人读不到（多半是机器人不在这个会话里），让网页去要用户授权。
+      if (!userAccessToken) return c.json({ ok: false, needUserAuth: true, error: text });
+      return fail(c, text, 502);
     }
   });
 
@@ -217,31 +238,6 @@ export function createCompanionApp(options: CompanionOptions = {}): Hono {
     }
   });
 
-  app.post('/api/card/send', async (c) => {
-    const body = await readBody(c.req.raw);
-    const messageId = stringField(body, 'messageId');
-    const chatId = stringField(body, 'chatId');
-    const as = stringField(body, 'as');
-    const userAccessToken = stringField(body, 'userAccessToken');
-    if (!messageId) return fail(c, '缺少 messageId');
-    if (!chatId) return fail(c, '缺少 chatId');
-    if (as !== 'bot' && as !== 'user') return fail(c, 'as 需要是 bot 或 user');
-    if (as === 'user' && !userAccessToken) return fail(c, '缺少用户授权，请先授权后重试');
-    try {
-      const feishu = api();
-      const card = await feishu.cardMessage(messageId);
-      const content = await reviveLarkletCard(card.content, cardRenderUrl, fetchImpl, renderCard);
-      const sent = await feishu.sendCard({
-        chatId,
-        content,
-        accessToken: as === 'user' ? userAccessToken : undefined,
-      });
-      return c.json({ ok: true, messageId: sent.messageId });
-    } catch (error) {
-      return fail(c, messageOf(error), 502);
-    }
-  });
-
   return app;
 }
 
@@ -309,43 +305,6 @@ async function renderFreshCard(
     throw new Error(`重新开一张应用卡片失败：${payload.msg || response.status}`);
   }
   return JSON.stringify(payload.card);
-}
-
-async function reviveLarkletCard(
-  content: string,
-  cardRenderUrl: string,
-  fetchImpl: typeof fetch,
-  renderCard?: (href: string) => Promise<string>,
-): Promise<string> {
-  if (!cardRenderUrl && !renderCard) return content;
-  const card = JSON.parse(content) as unknown;
-  const href = larkletHref(card);
-  if (!href) return content;
-  return renderFreshCard(href, cardRenderUrl, fetchImpl, renderCard);
-}
-
-/**
- * 从封印状态里还原打开卡片的 `href`。查询串一并带上，卡片状态（如一局游戏）按设计不带：
- * 转发出去的是「从这张卡片的页面重新打开」，不是复制那一刻的状态。
- */
-function larkletHref(card: unknown): string | null {
-  if (!card || typeof card !== 'object') return null;
-  const sealed = readCardState(card as Record<string, unknown>);
-  if (!sealed || typeof sealed !== 'object') return null;
-  const record = sealed as Record<string, unknown>;
-  if (record.v !== 1 || typeof record.pathname !== 'string' || typeof record.pattern !== 'string') return null;
-  const params = new URLSearchParams();
-  const search = record.search;
-  if (search && typeof search === 'object' && !Array.isArray(search)) {
-    for (const [key, value] of Object.entries(search as Record<string, unknown>)) {
-      if (typeof value === 'string') params.append(key, value);
-      else if (Array.isArray(value)) {
-        for (const item of value) if (typeof item === 'string') params.append(key, item);
-      }
-    }
-  }
-  const query = params.toString();
-  return query ? `${record.pathname}?${query}` : record.pathname;
 }
 
 function fail(c: Context, error: string, status: 400 | 502 = 400) {

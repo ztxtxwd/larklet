@@ -135,7 +135,7 @@ export default {
 
 机器人自定义菜单（事件类型 `application.bot.menu_v6`）和访问端点是同一条路：`event_key` 就是路径，例如 `guide` 或 `/ticket/42?from=menu`。用户私聊发送 `/guide`，或在群聊里 `@机器人 /guide`，同样会把斜杠后的内容当作 `event_key`（需订阅 `im.message.receive_v1`）。
 
-应用目录下的 `app/catalog.ts`（也认 `.tsx` / `.jsx` / `.js`）列出配套网页加号菜单里可发送的应用：
+应用目录下的 `app/catalog.ts`（也认 `.tsx` / `.jsx` / `.js`）列出配套网页可发送的应用。加号菜单里要显示这份目录，网页得注册 `registerPlusMenu(appCatalogMenu())`，并且知道 Larklet 进程的地址（`LARKLET_CARD_RENDER_URL`）：
 
 ```ts
 export const apps = [{ href: '/ticket/REQ-42', title: '审批单', description: '打开一张审批单' }];
@@ -157,7 +157,62 @@ Larklet 渲染这张卡片；这两类事件都没有卡片回传体。配置了
 
 ## 配套网页
 
-每个机器人旁边有一个网页，从飞书消息菜单的快捷应用打开。它使用飞书当前用户，不另建账号。在机器人所在的任意会话里，对一张卡片消息打开这个网页，目前可以把它再发出去：以机器人身份，或以当前用户身份。
+每个机器人旁边有一个网页，从飞书消息菜单的快捷操作打开，也从聊天框加号菜单打开。它使用飞书当前用户，不另建账号。
+
+从消息的「…」菜单打开时，网页显示当前用户、消息 ID（`open_message_id`）和消息类型。任何消息类型都能打开——文本、图片、富文本、文件、视频、卡片都一样，不只卡片。
+
+消息类型**先用机器人身份读**：机器人在这条消息的会话里时（开放平台要求「机器人必须在消息所属的群组内」），不用用户授权就能读到类型，页面也不会弹授权框。当前用户走网页应用免登（OAuth 2.0）拿 `user_access_token`，只要登录信息（`open_id`、姓名、头像），不申请任何权限。
+
+机器人不在那个会话里时，只有当前用户自己读得到消息，这时才需要用户授权：页面会让用户授权 `im:message`（单聊还要 `im:message.p2p_msg:get_as_user`，群聊要 `im:message.group_msg:get_as_user`），授权后照样能读到类型。没授权时页面上留了按钮可以再授权一次。
+
+这两类权限都在开放平台后台的**权限管理 → 用户身份权限**里开通，开完要**重新发布应用**。申请了应用没开通的权限，飞书会直接报错（`20027`，「当前应用权限不足」），授权整个中断 —— 所以读消息这条路上不会去申请发消息的权限。`im:message.send_as_user` 只有「以用户身份发消息」那个功能才要，普通读消息用不到。
+
+从聊天框加号菜单打开时，网页显示当前会话（`chat_id` 与会话名）和当前用户，两者都用飞书当前登录的人，不另建账号。当前会话由网页用 JSAPI `getTriggerContext` 读 triggerCode 换出来，用户信息走网页应用免登——加号菜单只要用户身份，免登时不申请增量权限，用户不会看到授权弹窗。
+
+要在加号菜单里放自己的内容，导出 `registerPlusMenu` 注册一段渲染，内容显示在会话与用户信息下面：
+
+```tsx
+// apps/web/src/main.tsx
+import { CompanionPage, registerPlusMenu } from 'larklet-web/client';
+
+registerPlusMenu({
+  title: '创建工单',
+  render: (ctx) => <MyForm chatId={ctx.chatId} user={ctx.user} />,
+});
+```
+
+`ctx` 里有当前会话（`chatId`、`chatName`）、当前用户（`openId`、`name`、`avatarUrl`）、机器人的应用目录（`apps`），以及 `chooseTargetChat` 和 `requestUserToken` 两个要授权才用的动作。想保留「列出应用、点一下把卡片发到会话」，注册现成的目录即可：
+
+```tsx
+import { appCatalogMenu, registerPlusMenu } from 'larklet-web/client';
+
+registerPlusMenu(appCatalogMenu());
+```
+
+目录里的应用可以在 `registerAppDetail` 里换成自己的详情页：
+
+```tsx
+import { registerAppDetail } from 'larklet-web/client';
+
+registerAppDetail('/ticket/REQ-42', {
+  title: '审批单',
+  render: (ctx) => <TicketForm chatId={ctx.chatId} />,
+});
+```
+
+飞书后台要分别给这个网页应用开两个场景：「消息快捷操作」和「聊天框『+』菜单」。桌面端的两个场景都要在会话内打开，AppLink 用 `mode=sidebar`；移动端填网页地址即可。
+
+**两个场景要配不同的路径。** 飞书客户端会复用同一个侧边栏页面，AppLink 的 `reload` 默认是 `false`——当前页面路径和要打开的路径相同时，客户端保留原页面，上一次的启动参数也就留着了：从加号菜单打开过页面，再从消息的「…」菜单进来，页面还以为自己是加号菜单。给两个场景不同的 `path` 就没这个毛病，网页按路径认场景：
+
+| 场景 | AppLink |
+| --- | --- |
+| 消息快捷操作 | `https://applink.feishu.cn/client/web_app/open?appId=xxx&mode=sidebar&path=/message` |
+| 聊天框「+」菜单 | `https://applink.feishu.cn/client/web_app/open?appId=xxx&mode=sidebar&path=/plus` |
+
+`path` 只能用路径，不能带 query；`/message` 与 `/plus` 这两个名字是约定，网页按路径的最后一段认场景。不想配不同路径也行，那就在 AppLink 里加 `reload=true`（PC 5.20+）：路径相同时重新加载页面，代价是每次都丢掉页面状态。
+
+改完场景要**发布新版本**才会生效。没发布的话，消息的「…」菜单里根本不会出现这个应用。
+
 
 `create-larklet` 会生成一个 pnpm workspace：`apps/bot` 是 Larklet 卡片应用，`apps/web` 是配套网页。网页用 Vite、React 和 Semi Design，主题是飞书 Universe Design（`@semi-bot/semi-theme-universedesign`）。
 
@@ -170,13 +225,13 @@ pnpm dev
 pnpm dev:web
 ```
 
-生成工程里的 `larklet` 与 `larklet-web` 取 npm 上的版本，版本号跟随 `create-larklet` 自己。飞书后台把消息快捷操作的地址指到 web；应用需要读取消息、以应用身份发消息，并让用户授权 `im:message` 与 `im:message.send_as_user`。
+生成工程里的 `larklet` 与 `larklet-web` 取 npm 上的版本，版本号跟随 `create-larklet` 自己。飞书后台把消息快捷操作的地址指到 web；应用需要读取消息、以应用身份发消息，并让用户授权 `im:message` 与 `im:message.send_as_user`。以用户身份读消息还要开 `im:message.group_msg:get_as_user`（群聊）和 `im:message.p2p_msg:get_as_user`（单聊）——机器人不在的群里，只有这两项能让用户自己读到那条消息。
 
 工程根目录还带一份 `.mcp.json`，注册 `feishu-doc` MCP（`npx feishu-doc-mcp@latest`），方便 Claude Code 查飞书开放平台文档。
 
 用户身份走 OAuth 2.0 的 `POST https://accounts.feishu.cn/oauth/v3/token`（旧的 `authen/v1/access_token`、`authen/v2/oauth/token` 都已是历史版本），再用 `user_access_token` 调 `authen/v1/user_info` 取 `open_id` / `union_id` / 姓名和头像。国际版把开放平台域名设成 `Lark` 或 `https://open.larksuite.com`，账号域名随之变成 `accounts.larksuite.com`。
 
-网页在浏览器里的飞书环境判定会同时看 UA 和 H5 SDK：`h5-js-sdk` 在任意浏览器都会给 `window.tt` / `window.h5sdk` 赋值，只看全局对象会把普通浏览器误判成飞书。JSSDK 鉴权失败时会降级成本地预览，而不是整页报错。从消息回读卡片再转发时，会按封印状态还原路径和查询串（`/framed?from=share`），卡片里的 `cardState`（例如一局游戏）按设计不复制。
+网页在浏览器里的飞书环境判定会同时看 UA 和 H5 SDK：`h5-js-sdk` 在任意浏览器都会给 `window.tt` / `window.h5sdk` 赋值，只看全局对象会把普通浏览器误判成飞书。JSSDK 鉴权失败时会降级成本地预览，而不是整页报错。
 
 `larklet dev` / `larklet start` 会按配置连上飞书：长连接收到卡片点击后，把新卡片从同一条连接回传；菜单和斜杠命令没有回传体，由机器人发到对应会话（群聊进群，否则私聊）。自己收事件时也可以走同一个入口：
 

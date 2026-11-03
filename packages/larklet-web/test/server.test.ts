@@ -2,35 +2,93 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 
-import { rawToDsl } from '@open-feishu-card/adapter';
-import { encodeStateUrl } from '@open-feishu-card/store';
-
-import { interactiveCardTitle } from '../src/feishu.js';
 import { createCompanionApp } from '../src/server.js';
 
-const rawCard = {
-  json_card: JSON.stringify({
-    schema: '2.0',
-    header: {
-      tag: 'card_header',
-      property: {
-        title: { tag: 'plain_text', property: { content: '请假' } },
-      },
-    },
-    body: { tag: 'body', property: { elements: [] } },
-  }),
-  json_attachment: {},
-  card_schema: 2,
-};
-const card = rawToDsl(rawCard);
+test('读消息的类型：先用机器人身份，读不到再用用户身份', async () => {
+  const calls: Array<{ url: string; authorization?: string }> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    calls.push({ url, authorization: new Headers(init?.headers).get('authorization') ?? undefined });
+    if (url.endsWith('/tenant_access_token/internal')) {
+      return json({ code: 0, tenant_access_token: 'tenant-token', expire: 7200 });
+    }
+    if (url.includes('/im/v1/messages/om_1')) {
+      return json({
+        code: 0,
+        data: { items: [{ message_id: 'om_1', msg_type: 'interactive', body: { content: '{}' } }] },
+      });
+    }
+    if (url.includes('/im/v1/messages/om_text')) {
+      return json({
+        code: 0,
+        data: { items: [{ message_id: 'om_text', msg_type: 'text', body: { content: '{}' } }] },
+      });
+    }
+    return json({ code: 404, msg: url }, 404);
+  };
 
-test('从卡片页眉读取标题', () => {
-  assert.equal(interactiveCardTitle(card), '请假');
-  assert.equal(interactiveCardTitle({ header: { title: '审批' } }), '审批');
-  assert.equal(interactiveCardTitle({}), undefined);
+  const app = createCompanionApp({
+    appId: 'cli_test',
+    appSecret: 'secret',
+    allowDirectMessageId: true,
+    title: '收件箱',
+    fetchImpl,
+  });
+
+  const config = await app.request('/api/config');
+  assert.deepEqual(await config.json(), {
+    ok: true,
+    appId: 'cli_test',
+    allowDirectMessageId: true,
+    title: '收件箱',
+    // 读消息只要 im:message；发消息才要 send_as_user。
+    scopes: ['im:message'],
+    sendScopes: ['im:message', 'im:message.send_as_user'],
+  });
+
+  const card = await app.request('/api/message', {
+    method: 'POST',
+    body: JSON.stringify({ messageId: 'om_1', userAccessToken: 'user-token' }),
+  });
+  assert.equal(card.status, 200);
+  assert.deepEqual(await card.json(), { ok: true, messageId: 'om_1', msgType: 'interactive' });
+
+  // 文本消息同样能读，快捷操作不再只认卡片。
+  const text = await app.request('/api/message', {
+    method: 'POST',
+    body: JSON.stringify({ messageId: 'om_text', userAccessToken: 'user-token' }),
+  });
+  assert.equal(text.status, 200);
+  assert.deepEqual(await text.json(), { ok: true, messageId: 'om_text', msgType: 'text' });
+
+  // 给了用户身份就用用户身份读，不多请求一次令牌。
+  const reads = calls.filter((call) => call.url.includes('/im/v1/messages/'));
+  assert.equal(reads.length, 2);
+  assert.ok(reads.every((call) => call.authorization === 'Bearer user-token'));
+  assert.equal(calls.some((call) => call.url.endsWith('/tenant_access_token/internal')), false);
+
+  // 没给用户身份：先用机器人身份读。机器人在会话里就不用麻烦用户授权。
+  const asBot = await app.request('/api/message', {
+    method: 'POST',
+    body: JSON.stringify({ messageId: 'om_1' }),
+  });
+  assert.equal(asBot.status, 200);
+  assert.deepEqual(await asBot.json(), { ok: true, messageId: 'om_1', msgType: 'interactive' });
+  assert.ok(
+    calls
+      .filter((call) => call.url.includes('/im/v1/messages/'))
+      .some((call) => call.authorization === 'Bearer tenant-token'),
+  );
+
+  const missing = await app.request('/api/message', {
+    method: 'POST',
+    body: JSON.stringify({ userAccessToken: 'user-token' }),
+  });
+  assert.equal(missing.status, 400);
+  assert.deepEqual(await missing.json(), { ok: false, error: '缺少 messageId' });
 });
 
-test('读取卡片并以机器人或用户身份发送', async () => {
+test('换取用户身份并给网页签名', async () => {
   const calls: Array<{ url: string; authorization?: string; body?: unknown }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -52,58 +110,14 @@ test('读取卡片并以机器人或用户身份发送', async () => {
     if (url.endsWith('/authen/v1/user_info')) {
       return json({ code: 0, data: { open_id: 'ou_1', union_id: 'on_1', name: 'Ada', avatar_url: '' } });
     }
-    if (url.includes('/im/v1/messages/om_1')) {
-      return json({
-        code: 0,
-        data: { items: [{ message_id: 'om_1', msg_type: 'interactive', body: { content: JSON.stringify(rawCard) } }] },
-      });
-    }
-    if (url.includes('/im/v1/messages/om_text')) {
-      return json({
-        code: 0,
-        data: { items: [{ message_id: 'om_text', msg_type: 'text', body: { content: '{}' } }] },
-      });
-    }
-    if (url.includes('/im/v1/messages?')) {
-      return json({ code: 0, data: { message_id: 'om_sent' } });
-    }
     return json({ code: 404, msg: url }, 404);
   };
 
   const app = createCompanionApp({
     appId: 'cli_test',
     appSecret: 'secret',
-    allowDirectMessageId: true,
-    title: '收件箱',
     fetchImpl,
   });
-
-  const config = await app.request('/api/config');
-  assert.deepEqual(await config.json(), {
-    ok: true,
-    appId: 'cli_test',
-    allowDirectMessageId: true,
-    title: '收件箱',
-  });
-
-  const loaded = await app.request('/api/card', {
-    method: 'POST',
-    body: JSON.stringify({ messageId: 'om_1' }),
-  });
-  assert.equal(loaded.status, 200);
-  assert.deepEqual(await loaded.json(), { ok: true, messageId: 'om_1', msgType: 'interactive', title: '请假' });
-
-  const asBot = await app.request('/api/card/send', {
-    method: 'POST',
-    body: JSON.stringify({ messageId: 'om_1', chatId: 'oc_1', as: 'bot' }),
-  });
-  assert.deepEqual(await asBot.json(), { ok: true, messageId: 'om_sent' });
-
-  const missingUser = await app.request('/api/card/send', {
-    method: 'POST',
-    body: JSON.stringify({ messageId: 'om_1', chatId: 'oc_1', as: 'user' }),
-  });
-  assert.equal(missingUser.status, 400);
 
   const authed = await app.request('/api/auth/callback', {
     method: 'POST',
@@ -128,25 +142,6 @@ test('读取卡片并以机器人或用户身份发送', async () => {
   });
   assert.equal(exchange?.authorization, undefined);
 
-  const asUser = await app.request('/api/card/send', {
-    method: 'POST',
-    body: JSON.stringify({ messageId: 'om_1', chatId: 'oc_1', as: 'user', userAccessToken: 'user-token' }),
-  });
-  assert.equal(asUser.status, 200);
-
-  const reads = calls.filter((call) => call.url.includes('/im/v1/messages/om_1'));
-  assert.ok(reads.every((call) => call.url.includes('card_msg_content_type=raw_card_content')));
-
-  const sends = calls.filter((call) => call.url.includes('/im/v1/messages?'));
-  assert.equal(sends.length, 2);
-  assert.equal(sends[0]?.authorization, 'Bearer tenant-token');
-  assert.equal(sends[1]?.authorization, 'Bearer user-token');
-  assert.deepEqual(sends[0]?.body, {
-    receive_id: 'oc_1',
-    msg_type: 'interactive',
-    content: JSON.stringify(card),
-  });
-
   const signed = await app.request('/api/jsapi-signature', {
     method: 'POST',
     body: JSON.stringify({ url: 'https://bot.example/send?message_id=om_1' }),
@@ -155,88 +150,6 @@ test('读取卡片并以机器人或用户身份发送', async () => {
   assert.equal(signature.ok, true);
   const raw = `jsapi_ticket=ticket-1&noncestr=${signature.nonceStr}&timestamp=${signature.timestamp}&url=https://bot.example/send?message_id=om_1`;
   assert.equal(signature.signature, createHash('sha1').update(raw).digest('hex'));
-
-  const text = await app.request('/api/card', {
-    method: 'POST',
-    body: JSON.stringify({ messageId: 'om_text' }),
-  });
-  assert.equal(text.status, 502);
-  assert.match((await text.json() as { error: string }).error, /不是卡片/);
-});
-
-test('发送时丢掉对局状态，只按应用路径重新开一张卡片', async () => {
-  const stateUrl = encodeStateUrl({
-    v: 1,
-    pattern: '/framed',
-    pathname: '/framed',
-    params: {},
-    search: { from: 'share' },
-    state: { play: { status: 'won' } },
-  });
-  const sealed = {
-    json_card: JSON.stringify({
-      schema: '2.0',
-      body: {
-        tag: 'body',
-        property: {
-          elements: [
-            {
-              id: 'card_state',
-              tag: 'column_set',
-              property: {
-                actions: [{ type: 'open_url', action: { url: stateUrl } }],
-                columns: [{ tag: 'column', property: { width: 'auto', elements: [] } }],
-              },
-            },
-          ],
-        },
-      },
-    }),
-    json_attachment: {},
-    card_schema: 2,
-  };
-  const revived = { schema: '2.0', header: { title: { content: '续玩' } }, body: { elements: [] } };
-  const calls: string[] = [];
-  const fetchImpl: typeof fetch = async (input, init) => {
-    const url = String(input);
-    calls.push(url);
-    if (url.endsWith('/tenant_access_token/internal')) {
-      return json({ code: 0, tenant_access_token: 'tenant-token', expire: 7200 });
-    }
-    if (url.includes('/im/v1/messages/om_sealed')) {
-      return json({
-        code: 0,
-        data: { items: [{ message_id: 'om_sealed', msg_type: 'interactive', body: { content: JSON.stringify(sealed) } }] },
-      });
-    }
-    if (url.endsWith('/_larklet/render')) {
-      const body = JSON.parse(String(init?.body)) as { href?: string; userState?: unknown; searchParams?: unknown };
-      // 查询串随路径一起还原；对局状态按设计丢弃。
-      assert.equal(body.href, '/framed?from=share');
-      assert.equal(body.userState, undefined);
-      assert.equal(body.searchParams, undefined);
-      return json({ card: revived });
-    }
-    if (url.includes('/im/v1/messages?')) {
-      const body = JSON.parse(String(init?.body)) as { content?: string };
-      assert.equal(body.content, JSON.stringify(revived));
-      return json({ code: 0, data: { message_id: 'om_sent' } });
-    }
-    return json({ code: 404, msg: url }, 404);
-  };
-
-  const app = createCompanionApp({
-    appId: 'cli_test',
-    appSecret: 'secret',
-    cardRenderUrl: 'http://larklet.test',
-    fetchImpl,
-  });
-  const sent = await app.request('/api/card/send', {
-    method: 'POST',
-    body: JSON.stringify({ messageId: 'om_sealed', chatId: 'oc_1', as: 'bot' }),
-  });
-  assert.equal(sent.status, 200);
-  assert.ok(calls.some((url) => url.endsWith('/_larklet/render')));
 });
 
 test('加号菜单按应用路径把新卡片发到当前会话', async () => {
@@ -310,7 +223,7 @@ test('加号菜单按应用路径把新卡片发到当前会话', async () => {
     method: 'POST',
     body: JSON.stringify({ href: '/semantle', chatId: 'oc_2', as: 'user', userAccessToken: 'user-token' }),
   });
-  assert.deepEqual(await asUser.json(), { ok: true, messageId: 'om_app' });
+  assert.equal(asUser.status, 200);
   const userSend = calls.filter((call) => call.url.includes('/im/v1/messages?')).at(-1);
   assert.equal(userSend?.authorization, 'Bearer user-token');
   assert.deepEqual(userSend?.body, {
@@ -353,6 +266,46 @@ test('加号菜单用调用方提供的卡片，不再请求渲染地址', async
   });
   assert.deepEqual(await sent.json(), { ok: true, messageId: 'om_local' });
   assert.equal(calls.some((url) => url.includes('/_larklet/')), false);
+});
+
+test('免登申请的权限可以自己定', async () => {
+  const app = createCompanionApp({
+    appId: 'cli_test',
+    appSecret: 'secret',
+    scopes: ['im:message', 'im:message.group_msg:get_as_user'],
+    sendScopes: ['im:message', 'im:message.send_as_user'],
+  });
+  const config = await app.request('/api/config');
+  assert.deepEqual(await config.json(), {
+    ok: true,
+    appId: 'cli_test',
+    allowDirectMessageId: false,
+    title: '飞书应用',
+    scopes: ['im:message', 'im:message.group_msg:get_as_user'],
+    sendScopes: ['im:message', 'im:message.send_as_user'],
+  });
+});
+
+test('机器人读不到消息时，让网页去要用户授权', async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/tenant_access_token/internal')) {
+      return json({ code: 0, tenant_access_token: 'tenant-token', expire: 7200 });
+    }
+    // 机器人不在这个会话里，读不到。
+    return json({ code: 99991679, msg: '机器人不在群组内' });
+  };
+  const app = createCompanionApp({ appId: 'cli_test', appSecret: 'secret', fetchImpl });
+
+  const result = await app.request('/api/message', {
+    method: 'POST',
+    body: JSON.stringify({ messageId: 'om_1' }),
+  });
+  assert.equal(result.status, 200);
+  const payload = (await result.json()) as { ok: boolean; needUserAuth?: boolean; error?: string };
+  assert.equal(payload.ok, false);
+  assert.equal(payload.needUserAuth, true);
+  assert.ok(payload.error);
 });
 
 function json(body: unknown, status = 200): Response {

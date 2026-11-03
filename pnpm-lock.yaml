@@ -74,12 +74,6 @@ importers:
 
   packages/larklet-web:
     dependencies:
-      '@open-feishu-card/adapter':
-        specifier: ^0.3.18
-        version: 0.3.18
-      '@open-feishu-card/store':
-        specifier: ^0.1.2
-        version: 0.1.2
       hono:
         specifier: ^4.9.6
         version: 4.13.13

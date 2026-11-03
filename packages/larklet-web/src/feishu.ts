@@ -1,7 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-import { rawToDsl } from '@open-feishu-card/adapter';
-
 const DEFAULT_OPEN_API = 'https://open.feishu.cn';
 
 export function resolveOpenApiBase(domain?: string): string {
@@ -10,38 +8,6 @@ export function resolveOpenApiBase(domain?: string): string {
   if (raw === 'Lark') return 'https://open.larksuite.com';
   if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, '');
   return DEFAULT_OPEN_API;
-}
-
-export function interactiveCardTitle(card: unknown): string | undefined {
-  if (!card || typeof card !== 'object') return undefined;
-  const header = (card as { header?: unknown }).header;
-  if (!header || typeof header !== 'object') return undefined;
-  const title = (header as { title?: unknown }).title;
-  if (typeof title === 'string') return title.trim() || undefined;
-  if (title && typeof title === 'object') {
-    const content = (title as { content?: unknown }).content;
-    if (typeof content === 'string' && content.trim()) return content.trim();
-  }
-  return undefined;
-}
-
-/** 把 `card_msg_content_type=raw_card_content` 的正文转成可发送的公开卡片 JSON。 */
-export function dslFromRawContent(content: string): unknown {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw new Error('卡片内容不是 JSON');
-  }
-  const dsl = rawToDsl(parsed);
-  if (!isSendableDsl(dsl)) throw new Error('原始卡片无法转成可发送的卡片');
-  return dsl;
-}
-
-function isSendableDsl(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  if ('json_card' in value) return false;
-  return 'body' in value || 'header' in value || 'elements' in value;
 }
 
 interface Cached {
@@ -81,12 +47,9 @@ interface MessageItem {
   body?: { content?: string };
 }
 
-export interface CardMessage {
+export interface MessageInfo {
   messageId: string;
   msgType: string;
-  title?: string;
-  /** 由 raw_card_content 转成的公开卡片 JSON，可直接作为发送接口的 content。 */
-  content: string;
 }
 
 export interface FeishuUser {
@@ -179,25 +142,20 @@ export class FeishuApi {
     };
   }
 
-  async cardMessage(messageId: string): Promise<CardMessage> {
-    const token = await this.tenantAccessToken();
-    const data = await this.get(
-      `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}?card_msg_content_type=raw_card_content`,
-      token,
-    );
+  /**
+   * 读一条消息的类型。文本、图片、富文本、卡片都能读，不限消息种类。
+   *
+   * 用用户身份（user_access_token）读：应用身份要求机器人先在消息所属的群里，
+   * 用户身份则只要用户自己在群里就行。
+   */
+  async messageInfo(messageId: string, accessToken: string): Promise<MessageInfo> {
+    const data = await this.get(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, accessToken);
     if (data.code !== 0) throw new Error(`读取消息失败：${data.msg || data.code}`);
     const item = data.data?.items?.[0];
-    const msgType = item?.msg_type ?? '';
-    const content = item?.body?.content ?? '';
-    if (msgType !== 'interactive' || !content) {
-      throw new Error(msgType ? `该消息不是卡片（${msgType}）` : '没有读到卡片内容');
-    }
-    const dsl = dslFromRawContent(content);
+    if (!item) throw new Error('没有读到消息');
     return {
-      messageId: item?.message_id || messageId,
-      msgType,
-      title: interactiveCardTitle(dsl),
-      content: JSON.stringify(dsl),
+      messageId: item.message_id || messageId,
+      msgType: item.msg_type ?? '',
     };
   }
 

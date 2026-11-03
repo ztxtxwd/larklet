@@ -1,25 +1,66 @@
 import { Banner, Breadcrumb, Button, Card, Dropdown, Empty, Nav, Spin, Toast, Typography } from '@douyinfe/semi-ui';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+
+import { chatInfoAttempts, plusChatType, readTriggerCode, sceneOf, type PlusChatType } from './launch.js';
 
 const H5_SDK = 'https://lf1-cdn-tos.bytegoofy.com/goofy/lark/op/h5-js-sdk-1.5.40.js';
-const SEND_SCOPES = ['im:message', 'im:message.send_as_user'];
+/**
+ * 网页应用免登申请的权限。
+ *
+ * 读消息只要 `im:message`；以用户身份发消息还要 `im:message.send_as_user`。
+ * 申请了应用没开通的用户身份权限，飞书会直接报错（20027），授权整个中断，
+ * 所以读消息那条路不去申请发消息的权限。
+ */
+const USER_READ_SCOPES = ['im:message'];
+const USER_SEND_SCOPES = ['im:message', 'im:message.send_as_user'];
+
+/** 飞书消息类型。快捷操作对所有类型都开放，这里只把类型翻成人话。 */
+const MESSAGE_TYPES: Record<string, string> = {
+  text: '文本消息',
+  image: '图片消息',
+  post: '富文本消息',
+  media: '视频消息',
+  file: '文件消息',
+  audio: '音频消息',
+  sticker: '表情消息',
+  interactive: '卡片消息',
+  merge_forward: '合并转发消息',
+  system: '系统消息',
+  unsupport: '暂不支持的消息类型',
+};
 
 interface PageConfig {
   appId: string;
   allowDirectMessageId: boolean;
   title: string;
+  /** 免登时申请的权限。 */
+  scopes: string[];
+  sendScopes: string[];
   previewUrl?: string;
   localPreview?: boolean;
 }
 
-interface CardInfo {
+interface MessageInfo {
   messageId: string;
-  title: string;
+  messageType: string;
+}
+
+/** 读消息的结果。读不到不算异常，错误文案给页面显示。 */
+interface MessageRead {
+  ok: boolean;
+  msgType: string;
+  error: string;
 }
 
 interface UserAuth {
   accessToken: string;
   expiresAt: number;
+  /** 这个 token 授权时申请的权限。空的表示只要了用户身份。 */
+  scopes?: string[];
+  /** 授权时顺带取到的当前用户。 */
+  openId?: string;
+  name?: string;
+  avatarUrl?: string;
 }
 
 interface ChatPick {
@@ -69,6 +110,86 @@ function registeredDetail(href: string): AppDetailRegistration | undefined {
   return appDetails.get(href);
 }
 
+/** 当前用户。飞书里登录的那个人。 */
+export interface PlusMenuUser {
+  openId?: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+/** 加号菜单页面能拿到的东西。 */
+export interface PlusMenuContext {
+  /** 当前会话 ID，`oc_` 开头。 */
+  chatId: string;
+  /** 当前会话名称。客户端读不到时没有。 */
+  chatName?: string;
+  /** 当前用户。 */
+  user: PlusMenuUser;
+  /** 应用 appId。 */
+  appId: string;
+  /** 是否在飞书客户端内。 */
+  inFeishu: boolean;
+  /** 本地模拟群，不打飞书。 */
+  preview: boolean;
+  /** 机器人的应用目录（`app/catalog.ts`）。 */
+  apps: ListedApp[];
+  /** 正在发送的应用路径，空串表示没有。 */
+  sendingHref: string;
+  /** 打开某个应用。 */
+  openApp: (app: ListedApp) => void;
+  /** 把某个应用的卡片发出去。 */
+  sendApp: (app: ListedApp, as: SendAs, target: SendTarget) => void;
+  /** 弹出飞书选会话。用户取消时返回 null。 */
+  chooseTargetChat: (confirmText?: string) => Promise<{ chatId: string; name: string } | null>;
+  /** 以当前用户身份发送需要的 user_access_token。必要时会弹出授权。 */
+  requestUserToken: () => Promise<string>;
+}
+
+export interface PlusMenuRegistration {
+  /** 这一块内容的标题。 */
+  title?: string;
+  render: (ctx: PlusMenuContext) => ReactNode;
+}
+
+let plusMenu: PlusMenuRegistration | undefined;
+
+/**
+ * 加号菜单里放自己的内容。
+ *
+ * 没注册时，页面只显示当前会话与当前用户。注册的内容渲染在信息卡下面。
+ */
+export function registerPlusMenu(detail: PlusMenuRegistration): void {
+  plusMenu = detail;
+}
+
+function registeredPlusMenu(): PlusMenuRegistration | undefined {
+  return plusMenu;
+}
+
+/**
+ * 现成的应用目录：列出机器人的应用，点了把卡片发到当前会话。
+ *
+ * ```tsx
+ * registerPlusMenu(appCatalogMenu());
+ * ```
+ */
+export function appCatalogMenu(): PlusMenuRegistration {
+  return {
+    title: '应用',
+    render: (ctx) => (
+      <AppList
+        apps={ctx.apps}
+        sendingHref={ctx.sendingHref}
+        inFeishu={ctx.inFeishu}
+        preview={ctx.preview}
+        chatId={ctx.chatId}
+        onOpen={ctx.openApp}
+        onSend={ctx.sendApp}
+      />
+    ),
+  };
+}
+
 interface JsapiError {
   errno?: number;
   errCode?: number;
@@ -91,6 +212,7 @@ declare global {
       chooseChat?: (opts: Record<string, unknown>) => void;
       getBlockActionSourceDetail?: (opts: Record<string, unknown>) => void;
       getTriggerContext?: (opts: Record<string, unknown>) => void;
+      getChatInfo?: (opts: Record<string, unknown>) => void;
     };
   }
 }
@@ -101,18 +223,28 @@ export function CompanionPage() {
 
 function SendCard() {
   const [config, setConfig] = useState<PageConfig | null>(null);
-  const [card, setCard] = useState<CardInfo | null>(null);
+  const [messageId, setMessageId] = useState('');
+  const [messageType, setMessageType] = useState('');
+  const [reading, setReading] = useState(false);
+  const [readError, setReadError] = useState('');
+  /** 机器人读不到这条消息，要用户授权才能读。 */
+  const [needUserAuth, setNeedUserAuth] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState<'bot' | 'user' | null>(null);
   const [userAuth, setUserAuth] = useState<UserAuth | null>(null);
+  const [userError, setUserError] = useState('');
+  // 授权结果留在 ref 里：换掉 token 时不必再弹一次授权。
+  const authRef = useRef<UserAuth | null>(null);
   const [inFeishu, setInFeishu] = useState(false);
   const [outsideFeishu, setOutsideFeishu] = useState(() => !inFeishuClient());
   const [apps, setApps] = useState<ListedApp[] | null>(null);
   const [chatId, setChatId] = useState('');
+  const [chatName, setChatName] = useState('');
   const [sendingHref, setSendingHref] = useState('');
   const [introHref, setIntroHref] = useState(() => new URLSearchParams(window.location.search).get('app') || '');
-  const fromPlus = isPlusMenu(new URLSearchParams(window.location.search));
+  const scene = sceneOf(new URLSearchParams(window.location.search), window.location.pathname);
+  const fromPlus = scene === 'plus';
+  const fromMessage = scene === 'message';
 
   useEffect(() => {
     const onPop = () => setIntroHref(new URLSearchParams(window.location.search).get('app') || '');
@@ -121,10 +253,18 @@ function SendCard() {
   }, []);
 
   useEffect(() => {
-    if (!fromPlus && !(inFeishu && apps !== null && !card)) return;
+    if (fromPlus) {
+      document.title = config?.title || '飞书应用';
+      return;
+    }
+    if (fromMessage) {
+      document.title = config?.title || '消息快捷操作';
+      return;
+    }
+    if (!(inFeishu && apps !== null && !messageId)) return;
     const current = apps?.find((item) => item.href === introHref);
     document.title = current?.title || registeredDetail(introHref)?.title || '玛卡巴卡';
-  }, [fromPlus, inFeishu, card, introHref, apps]);
+  }, [fromPlus, fromMessage, inFeishu, messageId, introHref, apps, config]);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,16 +283,27 @@ function SendCard() {
         const params = new URLSearchParams(window.location.search);
         if (!inside) {
           setOutsideFeishu(true);
-          if (cfg.previewUrl || cfg.localPreview || isPlusMenu(params) || params.get('app')) {
+          // 开发时可以直接用 ?message_id= 看一条消息。
+          const devId = (params.get('message_id') || '').trim();
+          if (devId && cfg.allowDirectMessageId) {
+            if (!cancelled) setMessageId(devId);
+            await readSourceMessage(devId, cfg.appId, cfg.scopes);
+            return;
+          }
+          if (fromPlus) {
+            // 应用目录是可选的，读不到也别把整页带崩。
+            const listed = await loadApps().catch(() => [] as ListedApp[]);
+            if (!cancelled) setApps(listed);
+          } else if (cfg.previewUrl || cfg.localPreview || params.get('app')) {
             const listed = await loadApps();
             if (!cancelled) setApps(listed);
           }
           return;
         }
-        if (isPlusMenu(params)) {
-          const listed = await loadApps();
-          if (cancelled) return;
-          setApps(listed);
+        if (fromPlus) {
+          // 应用目录是可选的，读不到也别把整页带崩。
+          const listed = await loadApps().catch(() => [] as ListedApp[]);
+          if (!cancelled) setApps(listed);
           // UA 像飞书但实际在普通浏览器时，鉴权会失败：降级成外部环境，别整页报错。
           const jsapiOk = await configJsapi().then(
             () => true,
@@ -167,10 +318,15 @@ function SendCard() {
           const triggerCode = readTriggerCode(params);
           if (!triggerCode) throw new Error('未拿到会话触发参数，请从聊天框的加号菜单进入。');
           const currentChat = await currentChatId(triggerCode);
-          if (!cancelled) setChatId(currentChat);
+          if (cancelled) return;
+          setChatId(currentChat);
+          // 会话名读不到就算了，chat ID 才是要紧的。
+          const name = await chatNameOf(currentChat, plusChatType(params)).catch(() => '');
+          if (!cancelled) setChatName(name);
+          await loadUserInfo(cfg.appId);
           return;
         }
-        if (!readTriggerCode(params) && !(params.get('message_id') || '').trim()) {
+        if (!fromMessage && !readTriggerCode(params) && !(params.get('message_id') || '').trim()) {
           const listed = await loadApps();
           if (cancelled) return;
           setApps(listed);
@@ -188,16 +344,20 @@ function SendCard() {
         }
         const directId = (params.get('message_id') || '').trim();
         if (directId && cfg.allowDirectMessageId) {
-          const info = await loadCard(directId);
-          if (!cancelled) setCard(info);
+          if (!cancelled) setMessageId(directId);
+          await loadUserInfo(cfg.appId);
+          await readSourceMessage(directId, cfg.appId, cfg.scopes);
           return;
         }
         const triggerCode = readTriggerCode(params);
         if (!triggerCode) throw new Error('未拿到消息触发参数，请从消息的快捷应用进入。');
         await configJsapi();
-        const messageId = await sourceMessageId(triggerCode);
-        const info = await loadCard(messageId);
-        if (!cancelled) setCard(info);
+        // 任何消息类型都能打开快捷操作，不再只认卡片。
+        const source = await sourceMessageId(triggerCode);
+        if (!cancelled) setMessageId(source);
+        // 当前用户：只要登录信息，不需要任何权限，也不会弹授权。
+        await loadUserInfo(cfg.appId);
+        await readSourceMessage(source, cfg.appId, cfg.scopes);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -229,6 +389,50 @@ function SendCard() {
     const about = apps?.find((item) => item.href === '/about');
     if (!about || introHref === about.href) return;
     openIntro(about);
+  }
+
+  function saveUserAuth(auth: UserAuth) {
+    authRef.current = auth;
+    setUserAuth(auth);
+  }
+
+  /**
+   * 读这条消息的类型。
+   *
+   * 先让服务端用机器人身份读：机器人在这条消息的会话里的话，不用麻烦用户授权。
+   * 机器人读不到（多半是机器人不在群里），才让用户授权，用用户身份再读一次。
+   */
+  async function readSourceMessage(id: string, appId: string, scopes: string[]) {
+    setReading(true);
+    setReadError('');
+    setNeedUserAuth(false);
+    // 用户已经授权过并且覆盖得住这次要的权限，就直接用，不用再问机器人。
+    if (!coversScopes(authRef.current?.scopes, scopes)) {
+      const asBot = await loadMessage(id, '').catch(() => null);
+      if (asBot?.ok) {
+        setMessageType(asBot.msgType ?? '');
+        setReading(false);
+        return;
+      }
+    }
+    let auth: UserAuth;
+    try {
+      auth = await ensureUserToken(appId, authRef.current, saveUserAuth, scopes);
+    } catch (err) {
+      setUserError(err instanceof Error ? err.message : String(err));
+      setNeedUserAuth(true);
+      setReading(false);
+      return;
+    }
+    try {
+      const info = await loadMessage(id, auth.accessToken);
+      if (info.ok) setMessageType(info.msgType);
+      else setReadError(info.error);
+    } catch (err) {
+      setReadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReading(false);
+    }
   }
 
   async function sendApp(app: ListedApp, as: SendAs, target: SendTarget) {
@@ -268,7 +472,17 @@ function SendCard() {
         Toast.error('请从飞书聊天框的加号菜单打开后再发送');
         return;
       }
-      const userAccessToken = as === 'user' ? await ensureUserToken(config?.appId ?? '', userAuth, setUserAuth) : undefined;
+      const userAccessToken =
+        as === 'user'
+          ? (
+              await ensureUserToken(
+                config?.appId ?? '',
+                authRef.current,
+                saveUserAuth,
+                config?.sendScopes ?? USER_SEND_SCOPES,
+              )
+            ).accessToken
+          : undefined;
       const result = await getJson<{ ok: boolean; error?: string }>('/api/apps/send', {
         href: app.href,
         chatId: targetChat,
@@ -294,37 +508,45 @@ function SendCard() {
 
   function requestUserToken(): Promise<string> {
     if (!inFeishu) return Promise.reject(new Error('请在飞书客户端内授权'));
-    return ensureUserToken(config?.appId ?? '', userAuth, setUserAuth);
+    return ensureUserToken(config?.appId ?? '', authRef.current, saveUserAuth, config?.sendScopes ?? USER_SEND_SCOPES).then(
+      (auth) => auth.accessToken,
+    );
   }
 
-  async function send(as: 'bot' | 'user') {
-    if (!card || sending) return;
-    if (!window.tt?.chooseChat) {
-      Toast.error('请在飞书客户端内选择会话');
+  /**
+   * 只要登录用户信息。传空 scope 列表，飞书不会让用户做增量授权，
+   * 也不需要应用开通任何权限。
+   */
+  async function loadUserInfo(appId: string) {
+    setUserError('');
+    try {
+      await ensureUserToken(appId, authRef.current, saveUserAuth, []);
+    } catch (err) {
+      setUserError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** 授权失败后由用户手动重试一次。 */
+  async function authorizePlusUser() {
+    await loadUserInfo(config?.appId ?? '');
+  }
+
+  /** 授权失败后由用户手动重试一次，授权过了再读一遍消息。 */
+  async function authorizeAndRead() {
+    setUserError('');
+    try {
+      await ensureUserToken(config?.appId ?? '', authRef.current, saveUserAuth, config?.scopes ?? USER_READ_SCOPES);
+    } catch (err) {
+      setUserError(err instanceof Error ? err.message : String(err));
       return;
     }
-    setSending(as);
-    try {
-      if (as === 'user') {
-        const token = await ensureUserToken(config?.appId ?? '', userAuth, setUserAuth);
-        const chat = await chooseChat(as === 'user' ? '以我的身份发送' : '以机器人身份发送');
-        if (!chat) return;
-        await postSend(card.messageId, chat, 'user', token);
-      } else {
-        const chat = await chooseChat('以机器人身份发送');
-        if (!chat) return;
-        await postSend(card.messageId, chat, 'bot');
-      }
-      Toast.success('已发送');
-    } catch (err) {
-      Toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSending(null);
-    }
+    if (messageId) await readSourceMessage(messageId, config?.appId ?? '', config?.scopes ?? USER_READ_SCOPES);
   }
 
   const simulate = Boolean((config?.previewUrl || config?.localPreview) && outsideFeishu);
-  const showCatalog = fromPlus || simulate || (inFeishu && apps !== null && !card);
+  // 有来源消息就显示消息页：快捷操作对所有消息类型都开放。
+  // 加号菜单有自己的页面：当前会话与当前用户。
+  const showCatalog = !messageId && !fromPlus && !fromMessage && (simulate || (inFeishu && apps !== null));
   const registered = introHref ? registeredDetail(introHref) : undefined;
   const currentApp =
     apps?.find((item) => item.href === introHref) ??
@@ -332,6 +554,52 @@ function SendCard() {
       ? { href: introHref, title: registered.title, description: registered.description || '' }
       : undefined);
   const listedApps = apps?.filter((item) => item.href !== '/about' && item.href !== '/share') ?? null;
+  const plusRegistration = registeredPlusMenu();
+  const plusContext: PlusMenuContext = {
+    chatId,
+    ...(chatName ? { chatName } : {}),
+    user: {
+      ...(userAuth?.openId ? { openId: userAuth.openId } : {}),
+      ...(userAuth?.name ? { name: userAuth.name } : {}),
+      ...(userAuth?.avatarUrl ? { avatarUrl: userAuth.avatarUrl } : {}),
+    },
+    appId: config?.appId ?? '',
+    inFeishu,
+    preview: simulate,
+    apps: listedApps ?? [],
+    sendingHref,
+    openApp: openIntro,
+    sendApp: (app, as, target) => void sendApp(app, as, target),
+    chooseTargetChat,
+    requestUserToken,
+  };
+
+  /** 某个应用的详情：注册过的用自己的内容，没注册的就是介绍加「发送」。 */
+  function appDetailView(app: ListedApp) {
+    const detail = registeredDetail(app.href);
+    if (detail) {
+      return detail.render({
+        app,
+        chatId,
+        appId: config?.appId ?? '',
+        inFeishu,
+        preview: simulate,
+        chooseTargetChat,
+        requestUserToken,
+      });
+    }
+    return (
+      <AppIntro
+        app={app}
+        sending={sendingHref === app.href}
+        disabled={!simulate && !inFeishu}
+        allowUser={!simulate && inFeishu}
+        allowCurrent={simulate || Boolean(chatId)}
+        allowPicked={!simulate && inFeishu}
+        onSend={(as, target) => void sendApp(app, as, target)}
+      />
+    );
+  }
 
   if (loading && !config) {
     return (
@@ -341,15 +609,86 @@ function SendCard() {
     );
   }
 
-  if (outsideFeishu && !fromPlus && !introHref && !simulate) {
+  if (outsideFeishu && !fromPlus && !introHref && !simulate && !messageId) {
     return (
       <main style={{ maxWidth: 480, margin: '0 auto', padding: 24 }}>
         <Banner
           type="warning"
           closeIcon={null}
           title="请在飞书中打开"
-          description="在聊天输入框点「+」，从菜单进入。"
+          description={
+            fromMessage
+              ? '在消息的「…」菜单里选本应用进入。'
+              : '在聊天输入框点「+」，从菜单进入。'
+          }
         />
+      </main>
+    );
+  }
+
+  if (fromPlus) {
+    return (
+      <main style={{ maxWidth: 480, margin: '0 auto', padding: 24 }}>
+        <style>{APP_PICK_STYLE}</style>
+        <Typography.Title heading={4} style={{ marginTop: 0 }}>
+          {config?.title || '飞书应用'}
+        </Typography.Title>
+        {error ? <Banner type="danger" description={error} closeIcon={null} /> : null}
+        {outsideFeishu ? (
+          <Banner
+            type="warning"
+            closeIcon={null}
+            description="当前不在飞书里，看不到真实会话。从聊天框的「+」菜单进入才有会话与用户信息。"
+          />
+        ) : null}
+        <Card title="会话">
+          <div className="info-row">
+            <span className="info-label">当前会话</span>
+            <span className="info-value">
+              {chatId ? (
+                <>
+                  <span>{chatId}</span>
+                  {chatName ? <span className="info-sub">{chatName}</span> : null}
+                </>
+              ) : (
+                <span className="info-sub">{error ? '读取失败' : inFeishu ? '读取中…' : '未知'}</span>
+              )}
+            </span>
+          </div>
+          <div className="info-row">
+            <span className="info-label">当前用户</span>
+            <span className="info-value">
+              {userAuth?.accessToken ? (
+                userAuth.name || userAuth.openId ? (
+                  <>
+                    {userAuth.avatarUrl ? <img className="info-avatar" src={userAuth.avatarUrl} alt="" /> : null}
+                    <span>{userAuth.name || '未命名用户'}</span>
+                    {userAuth.openId ? <span className="info-sub">{userAuth.openId}</span> : null}
+                  </>
+                ) : (
+                  <span>已授权</span>
+                )
+              ) : (
+                <span className="info-sub">{userError || '未授权'}</span>
+              )}
+            </span>
+          </div>
+          {userAuth?.accessToken ? null : (
+            <div className="info-actions">
+              <Button theme="outline" type="primary" disabled={!inFeishu} onClick={() => void authorizePlusUser()}>
+                授权后显示用户信息
+              </Button>
+              {inFeishu ? null : <span className="info-sub">授权需要在飞书客户端内完成。</span>}
+            </div>
+          )}
+        </Card>
+        {plusRegistration ? (
+          <section className="plus-menu">
+            {plusRegistration.title ? <Typography.Title heading={5}>{plusRegistration.title}</Typography.Title> : null}
+            {plusRegistration.render(plusContext)}
+          </section>
+        ) : null}
+        {currentApp ? appDetailView(currentApp) : null}
       </main>
     );
   }
@@ -393,76 +732,17 @@ function SendCard() {
             </div>
           ) : null}
           {error ? <Banner type="danger" description={error} closeIcon={null} /> : null}
-          {currentApp && registered ? (
-            <>
-              {registered.render({
-                app: currentApp,
-                chatId,
-                appId: config?.appId ?? '',
-                inFeishu,
-                preview: simulate,
-                chooseTargetChat,
-                requestUserToken,
-              })}
-            </>
-          ) : null}
-          {currentApp && !registered ? (
-            <AppIntro
-              app={currentApp}
-              sending={sendingHref === currentApp.href}
-              disabled={!simulate && !inFeishu}
-              allowUser={!simulate && inFeishu}
-              allowCurrent={simulate || Boolean(chatId)}
-              allowPicked={!simulate && inFeishu}
-              onSend={(as, target) => void sendApp(currentApp, as, target)}
-            />
-          ) : null}
+          {currentApp ? appDetailView(currentApp) : null}
           {listedApps && !currentApp ? (
-            <div className="app-pick">
-              {listedApps.map((app) => (
-            <div
-              key={app.href}
-              className="app-pick-card"
-              onClick={(event) => {
-                if ((event.target as HTMLElement).closest('.app-pick-send')) return;
-                openIntro(app);
-              }}
-            >
-              <span className="app-pick-text">
-                <span className="app-pick-title">{app.title}</span>
-                {app.description ? <span className="app-pick-desc">{app.description}</span> : null}
-              </span>
-              {registeredDetail(app.href) ? (
-                <Button
-                  className="app-pick-send"
-                  theme="outline"
-                  type="primary"
-                  size="small"
-                  icon={<SendIcon />}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openIntro(app);
-                  }}
-                >
-                  发布
-                </Button>
-              ) : (
-                <SendMenu
-                  className="app-pick-send"
-                  size="small"
-                  type="primary"
-                  loading={sendingHref === app.href}
-                  disabled={(!simulate && !inFeishu) || (sendingHref !== '' && sendingHref !== app.href)}
-                  allowUser={!simulate && inFeishu}
-                  allowCurrent={simulate || Boolean(chatId)}
-                  allowPicked={!simulate && inFeishu}
-                  onSend={(as, target) => void sendApp(app, as, target)}
-                />
-              )}
-            </div>
-          ))}
-              {listedApps.length === 0 ? <Empty description="还没有可发送的应用" /> : null}
-            </div>
+            <AppList
+              apps={listedApps}
+              sendingHref={sendingHref}
+              inFeishu={inFeishu}
+              preview={simulate}
+              chatId={chatId}
+              onOpen={openIntro}
+              onSend={(app, as, target) => void sendApp(app, as, target)}
+            />
           ) : null}
         </div>
         {simulate && config?.previewUrl ? (
@@ -474,8 +754,9 @@ function SendCard() {
 
   return (
     <main style={{ maxWidth: 480, margin: '0 auto', padding: 24 }}>
+      <style>{APP_PICK_STYLE}</style>
       <Typography.Title heading={4} style={{ marginTop: 0 }}>
-        {config?.title || '发送卡片'}
+        {config?.title || '消息快捷操作'}
       </Typography.Title>
       {loading ? (
         <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
@@ -483,50 +764,74 @@ function SendCard() {
         </div>
       ) : null}
       {error ? <Banner type="danger" description={error} closeIcon={null} /> : null}
-      {card ? (
-        <Card title={card.title || '卡片消息'} style={{ marginTop: error ? 16 : 0 }}>
-          <Typography.Paragraph type="tertiary" style={{ marginTop: 0 }}>
-            把这张卡片发到机器人所在的会话。以机器人身份发送时，机器人需要已经在目标会话里。
-          </Typography.Paragraph>
-          <Typography.Text type="tertiary" copyable={{ content: card.messageId }}>
-            {card.messageId}
-          </Typography.Text>
-          <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-            <Button theme="solid" type="primary" loading={sending === 'user'} disabled={sending !== null || !inFeishu} onClick={() => void send('user')}>
-              以我的身份发送
+      <Card title="消息" style={{ marginTop: error ? 16 : 0 }}>
+        <div className="info-row">
+          <span className="info-label">当前用户</span>
+          <span className="info-value">
+            {userAuth?.accessToken ? (
+              userAuth.name || userAuth.openId ? (
+                <>
+                  {userAuth.avatarUrl ? <img className="info-avatar" src={userAuth.avatarUrl} alt="" /> : null}
+                  <span>{userAuth.name || '未命名用户'}</span>
+                  {userAuth.openId ? <span className="info-sub">{userAuth.openId}</span> : null}
+                </>
+              ) : (
+                <span>已授权</span>
+              )
+            ) : (
+              <span className="info-sub">{userError || '未授权'}</span>
+            )}
+          </span>
+        </div>
+        <div className="info-row">
+          <span className="info-label">当前消息</span>
+          <span className="info-value">
+            {messageId ? (
+              <span>{messageId}</span>
+            ) : (
+              <span className="info-sub">{reading ? '读取中…' : '—'}</span>
+            )}
+          </span>
+        </div>
+        <div className="info-row">
+          <span className="info-label">消息类型</span>
+          <span className="info-value">
+            {messageType ? messageTypeLabel(messageType) : reading ? '读取中…' : '—'}
+            {readError ? <span className="info-sub">{readError}</span> : null}
+          </span>
+        </div>
+        {needUserAuth ? (
+          <div className="info-actions">
+            <Button theme="outline" type="primary" disabled={!inFeishu} onClick={() => void authorizeAndRead()}>
+              授权后读取这条消息
             </Button>
-            <Button loading={sending === 'bot'} disabled={sending !== null || !inFeishu} onClick={() => void send('bot')}>
-              以机器人身份发送
-            </Button>
+            {inFeishu ? null : <span className="info-sub">授权需要在飞书客户端内完成。</span>}
           </div>
-          {inFeishu ? null : (
-            <Typography.Paragraph type="tertiary" style={{ marginBottom: 0 }}>
-              选择会话需要在飞书客户端内完成。
-            </Typography.Paragraph>
-          )}
-        </Card>
-      ) : null}
-      {!loading && !error && !card && !apps ? <Empty description="没有可发送的卡片" /> : null}
+        ) : null}
+      </Card>
+      {!loading && !error && !messageId ? <Empty description="没有来源消息" /> : null}
     </main>
   );
 }
 
-async function postSend(messageId: string, chat: ChatPick, as: 'bot' | 'user', userAccessToken?: string) {
-  const result = await getJson<{ ok: boolean; error?: string }>('/api/card/send', {
+/**
+ * 读消息类型。
+ *
+ * `userAccessToken` 传空串就是让服务端用机器人身份读：机器人在会话里的话，
+ * 不用用户授权就能读到。
+ */
+async function loadMessage(messageId: string, userAccessToken: string): Promise<MessageRead> {
+  const result = await getJson<{ ok: boolean; error?: string; messageId?: string; msgType?: string }>('/api/message', {
     messageId,
-    chatId: chat.chatId,
-    as,
     userAccessToken,
   });
-  if (!result.ok) throw new Error(result.error || '发送失败');
+  if (!result.ok) return { ok: false, msgType: '', error: result.error || '读取消息失败' };
+  return { ok: true, msgType: result.msgType || '', error: '' };
 }
 
-async function loadCard(messageId: string): Promise<CardInfo> {
-  const result = await getJson<{ ok: boolean; error?: string; messageId?: string; title?: string }>('/api/card', {
-    messageId,
-  });
-  if (!result.ok || !result.messageId) throw new Error(result.error || '读取卡片失败');
-  return { messageId: result.messageId, title: result.title || '' };
+function messageTypeLabel(messageType?: string): string {
+  if (!messageType) return '未知消息类型';
+  return MESSAGE_TYPES[messageType] || messageType;
 }
 
 function SendIcon() {
@@ -576,6 +881,69 @@ function AppIntro({
         />
       ) : null}
     </article>
+  );
+}
+
+interface AppListProps {
+  apps: ListedApp[];
+  sendingHref: string;
+  inFeishu: boolean;
+  /** 本地模拟群，不打飞书。 */
+  preview: boolean;
+  /** 当前会话。有它才能「发送到本会话」。 */
+  chatId: string;
+  onOpen: (app: ListedApp) => void;
+  onSend: (app: ListedApp, as: SendAs, target: SendTarget) => void;
+}
+
+/** 机器人的应用列表。点一下把对应的卡片发到会话。 */
+function AppList({ apps, sendingHref, inFeishu, preview, chatId, onOpen, onSend }: AppListProps) {
+  if (apps.length === 0) return <Empty description="还没有可发送的应用" />;
+  return (
+    <div className="app-pick">
+      {apps.map((app) => (
+        <div
+          key={app.href}
+          className="app-pick-card"
+          onClick={(event) => {
+            if ((event.target as HTMLElement).closest('.app-pick-send')) return;
+            onOpen(app);
+          }}
+        >
+          <span className="app-pick-text">
+            <span className="app-pick-title">{app.title}</span>
+            {app.description ? <span className="app-pick-desc">{app.description}</span> : null}
+          </span>
+          {registeredDetail(app.href) ? (
+            <Button
+              className="app-pick-send"
+              theme="outline"
+              type="primary"
+              size="small"
+              icon={<SendIcon />}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpen(app);
+              }}
+            >
+              发布
+            </Button>
+          ) : (
+            <SendMenu
+              className="app-pick-send"
+              size="small"
+              type="primary"
+              loading={sendingHref === app.href}
+              disabled={(!preview && !inFeishu) || (sendingHref !== '' && sendingHref !== app.href)}
+              allowUser={!preview && inFeishu}
+              allowCurrent={preview || Boolean(chatId)}
+              allowPicked={!preview && inFeishu}
+              onSend={(as, target) => onSend(app, as, target)}
+            />
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -758,25 +1126,51 @@ const APP_PICK_STYLE = `
   white-space: normal;
   word-break: break-word;
 }
+.info-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+}
+.info-row + .info-row {
+  border-top: 1px solid var(--semi-color-border);
+}
+.info-label {
+  flex: none;
+  width: 72px;
+  color: rgba(0, 0, 0, 0.45);
+}
+.info-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  word-break: break-word;
+}
+.info-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.info-sub {
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+}
+.info-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.plus-menu {
+  margin-top: 16px;
+}
+.plus-menu .semi-typography {
+  margin: 0 0 8px;
+}
 `;
-
-function isPlusMenu(params: URLSearchParams): boolean {
-  const from = params.get('from') || '';
-  if (from === 'plus_menu_p2p' || from === 'plus_menu_group') return true;
-  const ability = params.get('required_launch_ability') || launchQuery(params).required_launch_ability || '';
-  return ability === 'chat_action';
-}
-
-function launchQuery(params: URLSearchParams): { __trigger_id__?: string; required_launch_ability?: string } {
-  const raw = params.get('bdp_launch_query');
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw) as { __trigger_id__?: string; required_launch_ability?: string };
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
 
 async function loadApps(): Promise<ListedApp[]> {
   const result = await getJson<{ ok: boolean; error?: string; apps?: ListedApp[] }>('/api/apps');
@@ -802,8 +1196,43 @@ function currentChatId(triggerCode: string): Promise<string> {
   });
 }
 
-function readTriggerCode(params: URLSearchParams): string {
-  return launchQuery(params).__trigger_id__ || '';
+/**
+ * 当前会话的名称。读不到就抛错，调用方自己决定要不要显示。
+ *
+ * 单聊要带 userType，群聊不用。PC 能从 `from` 看出是哪种会话，
+ * 移动端看不出来，就群聊、单聊各试一次。
+ */
+async function chatNameOf(openChatId: string, chatType: PlusChatType): Promise<string> {
+  const tt = window.tt;
+  if (!tt?.getChatInfo) throw new Error('当前环境不能读取会话信息');
+  let lastError: unknown;
+  for (const [type, user] of chatInfoAttempts(chatType)) {
+    try {
+      const info = await readChatInfo(openChatId, type, user);
+      if (info.name) return info.name;
+      lastError = new Error('没有读到会话名称');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('读取会话信息失败');
+}
+
+function readChatInfo(openChatId: string, chatType: 0 | 1, userType: 0 | 1): Promise<{ name: string }> {
+  const tt = window.tt;
+  const getChatInfo = tt?.getChatInfo;
+  if (!getChatInfo) return Promise.reject(new Error('当前环境不能读取会话信息'));
+  return new Promise((resolve, reject) => {
+    getChatInfo.call(tt, {
+      openChatId,
+      chatType,
+      userType,
+      success: (res: { name?: string; i18nNames?: { zh_cn?: string } }) => {
+        resolve({ name: res?.name || res?.i18nNames?.zh_cn || '' });
+      },
+      fail: (err: unknown) => reject(new Error(`获取会话信息失败：${formatAccessError(err)}`)),
+    });
+  });
 }
 
 function inFeishuClient(): boolean {
@@ -845,7 +1274,14 @@ function configJsapi(): Promise<void> {
         timestamp: cfg.timestamp,
         nonceStr: cfg.nonceStr,
         signature: cfg.signature,
-        jsApiList: ['getBlockActionSourceDetail', 'getTriggerContext', 'requestAccess', 'requestAuthCode', 'chooseChat'],
+        jsApiList: [
+          'getBlockActionSourceDetail',
+          'getTriggerContext',
+          'getChatInfo',
+          'requestAccess',
+          'requestAuthCode',
+          'chooseChat',
+        ],
         onSuccess: () => h5sdk.ready(() => resolve()),
         onFail: (err: unknown) => {
           jsapiReady = null;
@@ -857,6 +1293,7 @@ function configJsapi(): Promise<void> {
   return jsapiReady;
 }
 
+/** 来源消息。快捷操作对所有消息类型都开放，不只卡片。 */
 function sourceMessageId(triggerCode: string): Promise<string> {
   const tt = window.tt;
   if (!tt?.getBlockActionSourceDetail) return Promise.reject(new Error('当前环境不能读取来源消息'));
@@ -867,10 +1304,6 @@ function sourceMessageId(triggerCode: string): Promise<string> {
         const msg = res?.content?.messages?.[0];
         if (!msg) {
           reject(new Error('未取到来源消息'));
-          return;
-        }
-        if (msg.messageType !== 'interactive') {
-          reject(new Error(`该消息不是卡片（${msg.messageType || '未知类型'}）`));
           return;
         }
         if (!msg.openMessageId) {
@@ -884,9 +1317,26 @@ function sourceMessageId(triggerCode: string): Promise<string> {
   });
 }
 
-function ensureUserToken(appId: string, current: UserAuth | null, save: (auth: UserAuth) => void): Promise<string> {
-  if (current && current.accessToken && Date.now() < current.expiresAt - 60_000) {
-    return Promise.resolve(current.accessToken);
+/**
+ * 网页应用免登：拿授权码换 user_access_token，顺带取回当前用户。
+ * 授权过且没过期就复用缓存。
+ *
+ * `scopes` 是这次要的权限。缓存里的 token 没覆盖到，就重新授权一次：
+ * 加号菜单只拿用户身份（空列表），读消息要 `im:message`，两者的 token 不能混用。
+ */
+function ensureUserToken(
+  appId: string,
+  current: UserAuth | null,
+  save: (auth: UserAuth) => void,
+  scopes: string[] = USER_READ_SCOPES,
+): Promise<UserAuth> {
+  if (
+    current &&
+    current.accessToken &&
+    Date.now() < current.expiresAt - 60_000 &&
+    coversScopes(current.scopes, scopes)
+  ) {
+    return Promise.resolve(current);
   }
   return new Promise((resolve, reject) => {
     const tt = window.tt;
@@ -902,28 +1352,51 @@ function ensureUserToken(appId: string, current: UserAuth | null, save: (auth: U
     req.call(tt, {
       appID: appId,
       appId,
-      scopeList: SEND_SCOPES.slice(),
+      scopeList: scopes.slice(),
       success: (res: { code?: string; authCode?: string }) => {
         const code = res?.code || res?.authCode;
         if (!code) {
           reject(new Error('未返回授权码'));
           return;
         }
-        void getJson<{ ok: boolean; error?: string; accessToken?: string; expiresIn?: number }>('/api/auth/callback', { code })
+        void getJson<{
+          ok: boolean;
+          error?: string;
+          accessToken?: string;
+          expiresIn?: number;
+          openId?: string;
+          name?: string;
+          avatarUrl?: string;
+        }>('/api/auth/callback', { code })
           .then((user) => {
             if (!user.ok || !user.accessToken) {
               reject(new Error(user.error || '换取用户凭证失败'));
               return;
             }
             const expiresIn = user.expiresIn && user.expiresIn > 0 ? user.expiresIn : 7200;
-            save({ accessToken: user.accessToken, expiresAt: Date.now() + expiresIn * 1000 });
-            resolve(user.accessToken);
+            const auth: UserAuth = {
+              accessToken: user.accessToken,
+              expiresAt: Date.now() + expiresIn * 1000,
+              scopes: scopes.slice(),
+              ...(user.openId ? { openId: user.openId } : {}),
+              ...(user.name ? { name: user.name } : {}),
+              ...(user.avatarUrl ? { avatarUrl: user.avatarUrl } : {}),
+            };
+            save(auth);
+            resolve(auth);
           })
           .catch((err: unknown) => reject(err instanceof Error ? err : new Error(String(err))));
       },
       fail: (err: unknown) => reject(new Error(formatAccessError(err))),
     });
   });
+}
+
+/** 缓存的 token 能不能覆盖这次要的权限。 */
+function coversScopes(have: string[] | undefined, want: string[]): boolean {
+  if (!want.length) return true;
+  const owned = new Set(have ?? []);
+  return want.every((scope) => owned.has(scope));
 }
 
 function chooseChat(confirmText: string): Promise<ChatPick | null> {

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,8 +20,11 @@ const app = createCompanionApp({
 });
 
 if (process.env.NODE_ENV === 'production') {
-  app.use('/assets/*', serveStatic({ root: path.join(dir, '../dist') }));
-  app.get('*', serveStatic({ root: path.join(dir, '../dist') }));
+  const dist = path.join(dir, '../dist');
+  app.use('/assets/*', serveStatic({ root: dist }));
+  app.get('*', serveStatic({ root: dist }));
+  // 场景路径（/message、/plus）没有对应的静态文件，回首页让网页自己认场景。
+  app.get('*', (c) => c.html(readFileSync(path.join(dist, 'index.html'), 'utf8')));
 }
 
 const port = Number(process.env.PORT ?? 8788);
