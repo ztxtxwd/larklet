@@ -1,6 +1,6 @@
 {
   "name": "larklet-web",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Larklet 机器人的配套网页：飞书消息快捷操作里看当前用户、消息与消息类型，加号菜单里看当前会话与用户。",
   "type": "module",
   "exports": {
