@@ -26,11 +26,17 @@ test('生成包含 bot 与 web 的 workspace', () => {
     assert.equal(bot.dependencies.larklet, `^${rootVersion.version}`);
 
     const web = JSON.parse(fs.readFileSync(path.join(created.dest, 'apps/web/package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
       dependencies: { 'larklet-web': string };
       devDependencies: { '@semi-bot/semi-theme-universedesign': string };
     };
     assert.equal(web.dependencies['larklet-web'], `^${rootVersion.version}`);
     assert.equal(web.devDependencies['@semi-bot/semi-theme-universedesign'], '^1.0.13');
+    // tsx watch 在 Windows 上拿不到终端 stdin（被 concurrently 接成管道）时会卡住，
+    // 8788 永远不监听，所以用 Node 自带的 watch。
+    assert.equal(web.scripts['dev:api'], 'node --watch --import tsx src/server.ts');
+    // `NODE_ENV=x cmd` 只有 sh 认识，cmd/PowerShell 要用 cross-env。
+    assert.equal(web.scripts['start'], 'cross-env NODE_ENV=production tsx src/server.ts');
 
     const vite = fs.readFileSync(path.join(created.dest, 'apps/web/vite.config.ts'), 'utf8');
     assert.match(vite, /@semi-bot\/semi-theme-universedesign/);

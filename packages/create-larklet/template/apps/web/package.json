@@ -4,10 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n api,web \"pnpm dev:api\" \"pnpm dev:web\"",
-    "dev:api": "tsx watch src/server.ts",
+    "dev:api": "node --watch --import tsx src/server.ts",
     "dev:web": "vite",
     "build": "vite build",
-    "start": "NODE_ENV=production tsx src/server.ts",
+    "start": "cross-env NODE_ENV=production tsx src/server.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
@@ -26,6 +26,7 @@
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.4.1",
     "concurrently": "^9.1.2",
+    "cross-env": "^10.1.0",
     "sass": "^1.86.3",
     "tsx": "^4.19.3",
     "typescript": "^5.9.3",
