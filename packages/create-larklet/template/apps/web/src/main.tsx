@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client';
-import { CompanionPage } from 'larklet-web/client';
 
+import { App } from './App';
 import './app.css';
 
-createRoot(document.getElementById('root')!).render(<CompanionPage />);
+createRoot(document.getElementById('root')!).render(<App />);

@@ -100,7 +100,7 @@ pnpm inbox          # 示例，打开 http://127.0.0.1:8787（首页「开始指
 
 同一页可以打开多张卡片，每张有一名模拟用户（`open_id` / 用户名 / 头像）。再打开同一路径会加入已经打开的那次会话：只有一个人时按私聊带上他的消息 id，两个人及以上共享同一条消息。共享更新（`update_multi` 不为 `false`）会刷新这一会话里的每张卡片，并在跳转后一起换到新路径。只更新操作者本人时，其他人保持原卡片。`operator()` 读到的是点按钮的那一名模拟用户。
 
-配套网页在开发时会嵌一个模拟群（`/?embed=1&room=dev`），用来和机器人联调。这个群不出现在单独打开的预览页上，刷新预览也不会留下网页里发出的卡片。群里固定有一名卖家和至少两名买家，嵌进去的页面可以点「加一位买家」。网页进程把卡片投进这个群，嵌页用 SSE 接住：
+开发时可以把模拟群（`/?embed=1&room=dev`）嵌进配套网页，用来和机器人联调。这个群不出现在单独打开的预览页上，刷新预览也不会留下网页里发出的卡片。群里固定有一名卖家和至少两名买家，嵌进去的页面可以点「加一位买家」。网页进程把卡片投进这个群，嵌页用 SSE 接住：
 
 - `GET /_larklet/preview/room?id=dev` 读取 `chatId` 和虚拟用户
 - `POST /_larklet/preview/deliver` 投递 `{ room, kind: "chat" | "ephemeral", href, userState, openId?, media? }`
@@ -135,7 +135,7 @@ export default {
 
 机器人自定义菜单（事件类型 `application.bot.menu_v6`）和访问端点是同一条路：`event_key` 就是路径，例如 `guide` 或 `/ticket/42?from=menu`。用户私聊发送 `/guide`，或在群聊里 `@机器人 /guide`，同样会把斜杠后的内容当作 `event_key`（需订阅 `im.message.receive_v1`）。
 
-应用目录下的 `app/catalog.ts`（也认 `.tsx` / `.jsx` / `.js`）列出配套网页可发送的应用。加号菜单里要显示这份目录，网页得注册 `registerPlusMenu(appCatalogMenu())`，并且知道 Larklet 进程的地址（`LARKLET_CARD_RENDER_URL`）：
+应用目录下的 `app/catalog.ts`（也认 `.tsx` / `.jsx` / `.js`）列出配套网页可发送的应用。框架通过 `useCompanion()` 的 `apps` 暴露这份目录；`sendApp()` 需要知道 Larklet 进程的地址（`LARKLET_CARD_RENDER_URL`）才能渲染新卡片：
 
 ```ts
 export const apps = [{ href: '/ticket/REQ-42', title: '审批单', description: '打开一张审批单' }];
@@ -157,48 +157,62 @@ Larklet 渲染这张卡片；这两类事件都没有卡片回传体。配置了
 
 ## 配套网页
 
-每个机器人旁边有一个网页，从飞书消息菜单的快捷操作打开，也从聊天框加号菜单打开。它使用飞书当前用户，不另建账号。
+配套网页是一个无头框架：`larklet-web` 负责场景判断、鉴权、读来源消息和当前会话，界面由开发者自己写。服务端用 `createCompanionApp()` 挂上 `/api/config`、`/api/jsapi-signature`、`/api/auth/callback`、`/api/message`、`/api/apps`、`/api/apps/send` 这些接口；浏览器端用 `CompanionSession`，React 用 `useCompanion()`。
 
-从消息的「…」菜单打开时，网页显示当前用户、消息 ID（`open_message_id`）和消息类型。任何消息类型都能打开——文本、图片、富文本、文件、视频、卡片都一样，不只卡片。
+```tsx
+// apps/web/src/MessagePage.tsx
+import { useCompanion } from 'larklet-web/react';
 
-消息类型**先用机器人身份读**：机器人在这条消息的会话里时（开放平台要求「机器人必须在消息所属的群组内」），不用用户授权就能读到类型，页面也不会弹授权框。当前用户走网页应用免登（OAuth 2.0）拿 `user_access_token`，只要登录信息（`open_id`、姓名、头像），不申请任何权限。
+export function MessagePage() {
+  const { ready, user, message, authorizeMessage } = useCompanion();
+  if (!ready) return <p>加载中…</p>;
+  return (
+    <main>
+      <p>当前用户：{user.name || user.openId || '未授权'}</p>
+      <p>来源消息：{message.messageId || '—'}</p>
+      <p>消息类型：{message.msgType || '—'}</p>
+      {message.needUserAuth ? (
+        <button onClick={() => void authorizeMessage()}>授权后读取这条消息</button>
+      ) : null}
+    </main>
+  );
+}
+```
 
-机器人不在那个会话里时，只有当前用户自己读得到消息，这时才需要用户授权：页面会让用户授权 `im:message`（单聊还要 `im:message.p2p_msg:get_as_user`，群聊要 `im:message.group_msg:get_as_user`），授权后照样能读到类型。没授权时页面上留了按钮可以再授权一次。
+加号菜单的页面用同一个 hook 拿 `chat` 与 `apps`；模板里分别放在 `MessagePage.tsx` 和 `PlusPage.tsx`。
+
+非 React 的页面直接用 `new CompanionSession()`：`getState()` 读快照，`subscribe()` 订阅变化，动作在 `actions` 上。
+
+`useCompanion()` 返回的状态：
+
+| 字段 | 内容 |
+| --- | --- |
+| `ready` / `loading` / `error` | 初始化进度与失败原因 |
+| `scene` | `'message'`、`'plus'` 或空串 |
+| `inFeishu` / `preview` | 是否确认在飞书里；不在飞书但配置了本地预览 |
+| `config` | `/api/config` 的返回，含 `appId`、权限、标题 |
+| `user` | `authorized`、`authorizing`、`openId`、`name`、`avatarUrl`、`accessToken`、`scopes`、`error` |
+| `message` | `messageId`、`msgType`、`reading`、`error`、`needUserAuth` |
+| `chat` | `chatId`、`name`、`reading`、`error` |
+| `apps` | 机器人的应用目录，另有 `appsLoading` / `appsError` |
+| `sendingHref` | 正在发送的应用路径 |
+
+动作：
+
+- `authorizeUser()`：拿当前用户信息，只登录，不申请增量权限。
+- `authorizeMessage()`：授权读消息，然后重读来源消息。
+- `requestUserToken()`：以用户身份发送前拿 `user_access_token`。
+- `chooseChat(confirmText?)`：弹出飞书选会话。
+- `reloadApps()`：重新读应用目录。
+- `sendApp(href, { as: 'user' | 'bot', target: 'current' | 'picked' })`：按应用路径渲染一张新卡片发出去；本地预览时投到模拟群。
+
+从消息的「…」菜单打开时，框架用 JSAPI 换出来源消息 ID（`open_message_id`），**先用机器人身份读**消息类型：机器人在这条消息的会话里时（开放平台要求「机器人必须在消息所属的群组内」），不用用户授权就能读到，也不会弹授权框。机器人不在那个会话里，才让用户授权 `im:message`（单聊还要 `im:message.p2p_msg:get_as_user`，群聊要 `im:message.group_msg:get_as_user`），授权后重读。任何消息类型都能打开——文本、图片、富文本、文件、视频、卡片都一样。
+
+从聊天框加号菜单打开时，框架用 JSAPI `getTriggerContext` 换出当前会话（`chat_id` 与会话名），并用网页应用免登拿当前用户；免登只取登录信息，不申请增量权限，不会弹授权框。
+
+`useCompanion()` 只给状态和动作，界面完全由开发者决定；模板 `apps/web` 按路径分成消息快捷操作和加号菜单两个页面（`MessagePage.tsx` / `PlusPage.tsx`）。要在页面里显示机器人应用目录、发卡片，用 `apps` / `reloadApps()` / `sendApp()`。
 
 这两类权限都在开放平台后台的**权限管理 → 用户身份权限**里开通，开完要**重新发布应用**。申请了应用没开通的权限，飞书会直接报错（`20027`，「当前应用权限不足」），授权整个中断 —— 所以读消息这条路上不会去申请发消息的权限。`im:message.send_as_user` 只有「以用户身份发消息」那个功能才要，普通读消息用不到。
-
-从聊天框加号菜单打开时，网页显示当前会话（`chat_id` 与会话名）和当前用户，两者都用飞书当前登录的人，不另建账号。当前会话由网页用 JSAPI `getTriggerContext` 读 triggerCode 换出来，用户信息走网页应用免登——加号菜单只要用户身份，免登时不申请增量权限，用户不会看到授权弹窗。
-
-要在加号菜单里放自己的内容，导出 `registerPlusMenu` 注册一段渲染，内容显示在会话与用户信息下面：
-
-```tsx
-// apps/web/src/main.tsx
-import { CompanionPage, registerPlusMenu } from 'larklet-web/client';
-
-registerPlusMenu({
-  title: '创建工单',
-  render: (ctx) => <MyForm chatId={ctx.chatId} user={ctx.user} />,
-});
-```
-
-`ctx` 里有当前会话（`chatId`、`chatName`）、当前用户（`openId`、`name`、`avatarUrl`）、机器人的应用目录（`apps`），以及 `chooseTargetChat` 和 `requestUserToken` 两个要授权才用的动作。想保留「列出应用、点一下把卡片发到会话」，注册现成的目录即可：
-
-```tsx
-import { appCatalogMenu, registerPlusMenu } from 'larklet-web/client';
-
-registerPlusMenu(appCatalogMenu());
-```
-
-目录里的应用可以在 `registerAppDetail` 里换成自己的详情页：
-
-```tsx
-import { registerAppDetail } from 'larklet-web/client';
-
-registerAppDetail('/ticket/REQ-42', {
-  title: '审批单',
-  render: (ctx) => <TicketForm chatId={ctx.chatId} />,
-});
-```
 
 飞书后台要分别给这个网页应用开两个场景：「消息快捷操作」和「聊天框『+』菜单」。桌面端的两个场景都要在会话内打开，AppLink 用 `mode=sidebar`；移动端填网页地址即可。
 
@@ -214,7 +228,7 @@ registerAppDetail('/ticket/REQ-42', {
 改完场景要**发布新版本**才会生效。没发布的话，消息的「…」菜单里根本不会出现这个应用。
 
 
-`create-larklet` 会生成一个 pnpm workspace：`apps/bot` 是 Larklet 卡片应用，`apps/web` 是配套网页。网页用 Vite、React 和 Semi Design，主题是飞书 Universe Design（`@semi-bot/semi-theme-universedesign`）。
+`create-larklet` 会生成一个 pnpm workspace：`apps/bot` 是 Larklet 卡片应用，`apps/web` 是配套网页。网页用 Vite 和 React，`MessagePage.tsx` / `PlusPage.tsx` 是两个用 `useCompanion()` 的页面；界面和样式都由你改。
 
 ```bash
 pnpm create-larklet ../my-bot
@@ -231,7 +245,7 @@ pnpm dev:web
 
 用户身份走 OAuth 2.0 的 `POST https://accounts.feishu.cn/oauth/v3/token`（旧的 `authen/v1/access_token`、`authen/v2/oauth/token` 都已是历史版本），再用 `user_access_token` 调 `authen/v1/user_info` 取 `open_id` / `union_id` / 姓名和头像。国际版把开放平台域名设成 `Lark` 或 `https://open.larksuite.com`，账号域名随之变成 `accounts.larksuite.com`。
 
-网页在浏览器里的飞书环境判定会同时看 UA 和 H5 SDK：`h5-js-sdk` 在任意浏览器都会给 `window.tt` / `window.h5sdk` 赋值，只看全局对象会把普通浏览器误判成飞书。JSSDK 鉴权失败时会降级成本地预览，而不是整页报错。
+框架在浏览器里的飞书环境判定会同时看 UA 和 H5 SDK：`h5-js-sdk` 在任意浏览器都会给 `window.tt` / `window.h5sdk` 赋值，只看全局对象会把普通浏览器误判成飞书。JSSDK 鉴权失败时会降级成本地预览，而不是整页报错。
 
 `larklet dev` / `larklet start` 会按配置连上飞书：长连接收到卡片点击后，把新卡片从同一条连接回传；菜单和斜杠命令没有回传体，由机器人发到对应会话（群聊进群，否则私聊）。自己收事件时也可以走同一个入口：
 

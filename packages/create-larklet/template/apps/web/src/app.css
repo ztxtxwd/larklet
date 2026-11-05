@@ -1,3 +1,28 @@
+:root {
+  color-scheme: light dark;
+  --page-bg: #f5f6f7;
+  --card-bg: #fff;
+  --text: rgba(0, 0, 0, 0.88);
+  --muted: rgba(0, 0, 0, 0.55);
+  --border: rgba(0, 0, 0, 0.12);
+  --primary: #3370ff;
+  --danger: #f54a45;
+  --success: #2ea121;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page-bg: #171717;
+    --card-bg: #242424;
+    --text: rgba(255, 255, 255, 0.9);
+    --muted: rgba(255, 255, 255, 0.6);
+    --border: rgba(255, 255, 255, 0.15);
+    --primary: #4c88ff;
+    --danger: #ff6b66;
+    --success: #4cc35c;
+  }
+}
+
 html,
 body,
 #root {
@@ -6,5 +31,142 @@ body,
 }
 
 body {
-  background: var(--semi-color-bg-0);
+  background: var(--page-bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--primary);
+}
+
+.page {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+h1 {
+  margin: 0 0 16px;
+  font-size: 20px;
+  line-height: 1.4;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.card {
+  padding: 16px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.card + .card {
+  margin-top: 16px;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.row + .row {
+  border-top: 1px solid var(--border);
+}
+
+.row-label {
+  flex: none;
+  width: 72px;
+  color: var(--muted);
+}
+
+.row-value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.row-sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  margin: 0 0 12px;
+  color: var(--danger);
+}
+
+.button {
+  height: 32px;
+  margin-top: 12px;
+  padding: 0 12px;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.app-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.app {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.app-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.app-title {
+  font-weight: 600;
+}
+
+.app-desc {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.app .button {
+  flex: none;
+  margin-top: 0;
+}
+
+.card .error,
+.card .ok {
+  margin: 12px 0 0;
+}
+
+.ok {
+  color: var(--success);
 }

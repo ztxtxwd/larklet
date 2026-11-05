@@ -1,7 +1,7 @@
 {
   "name": "larklet-web",
   "version": "0.3.1",
-  "description": "Larklet 机器人的配套网页：飞书消息快捷操作里看当前用户、消息与消息类型，加号菜单里看当前会话与用户。",
+  "description": "Larklet 机器人的配套网页框架：场景识别、免登鉴权、来源消息与当前会话。",
   "type": "module",
   "exports": {
     ".": {
@@ -15,6 +15,12 @@
       "import": "./src/client/index.ts",
       "require": "./src/client/index.ts",
       "default": "./src/client/index.ts"
+    },
+    "./react": {
+      "types": "./src/client/react.tsx",
+      "import": "./src/client/react.tsx",
+      "require": "./src/client/react.tsx",
+      "default": "./src/client/react.tsx"
     }
   },
   "files": [
@@ -32,18 +38,18 @@
     "hono": "^4.9.6"
   },
   "peerDependencies": {
-    "@douyinfe/semi-ui": "^2.70.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react": "^18.3.1 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "tsx": "^4.19.3",
-    "@douyinfe/semi-ui": "^2.104.0",
     "@types/node": "^22.20.1",
     "@types/react": "^18.3.18",
-    "@types/react-dom": "^18.3.5",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "typescript": "^5.9.3"
   },
   "repository": {

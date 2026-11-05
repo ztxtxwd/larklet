@@ -27,11 +27,13 @@ test('生成包含 bot 与 web 的 workspace', () => {
 
     const web = JSON.parse(fs.readFileSync(path.join(created.dest, 'apps/web/package.json'), 'utf8')) as {
       scripts: Record<string, string>;
-      dependencies: { 'larklet-web': string };
-      devDependencies: { '@semi-bot/semi-theme-universedesign': string };
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
     };
     assert.equal(web.dependencies['larklet-web'], `^${rootVersion.version}`);
-    assert.equal(web.devDependencies['@semi-bot/semi-theme-universedesign'], '^1.0.13');
+    // 模板不绑定组件库，预置页自带样式。
+    assert.equal(web.dependencies['@douyinfe/semi-ui'], undefined);
+    assert.equal(web.devDependencies['@semi-bot/semi-theme-universedesign'], undefined);
     // tsx watch 在 Windows 上拿不到终端 stdin（被 concurrently 接成管道）时会卡住，
     // 8788 永远不监听，所以用 Node 自带的 watch。
     assert.equal(web.scripts['dev:api'], 'node --watch --import tsx src/server.ts');
@@ -39,7 +41,13 @@ test('生成包含 bot 与 web 的 workspace', () => {
     assert.equal(web.scripts['start'], 'cross-env NODE_ENV=production tsx src/server.ts');
 
     const vite = fs.readFileSync(path.join(created.dest, 'apps/web/vite.config.ts'), 'utf8');
-    assert.match(vite, /@semi-bot\/semi-theme-universedesign/);
+    assert.doesNotMatch(vite, /semi/i);
+    const app = fs.readFileSync(path.join(created.dest, 'apps/web/src/App.tsx'), 'utf8');
+    assert.match(app, /MessagePage/);
+    assert.match(app, /PlusPage/);
+    for (const page of ['MessagePage.tsx', 'PlusPage.tsx']) {
+      assert.match(fs.readFileSync(path.join(created.dest, 'apps/web/src', page), 'utf8'), /useCompanion/);
+    }
     assert.match(fs.readFileSync(path.join(created.dest, '.gitignore'), 'utf8'), /node_modules/);
 
     const mcp = JSON.parse(fs.readFileSync(path.join(created.dest, '.mcp.json'), 'utf8')) as {

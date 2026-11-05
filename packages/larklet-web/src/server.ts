@@ -17,7 +17,7 @@ export interface CompanionOptions {
    * Larklet 进程根地址。加号菜单发卡时按应用路径向该地址渲染一张新卡片。
    */
   cardRenderUrl?: string;
-  /** 页面标题，默认「飞书应用」。 */
+  /** 返回给网页的标题，默认「飞书应用」。框架不渲染。 */
   title?: string;
   /**
    * 读消息时申请的权限（用户身份）。默认只要 `im:message`。
@@ -33,12 +33,12 @@ export interface CompanionOptions {
    */
   sendScopes?: string[];
   /**
-   * 开发时 Larklet 预览根地址。浏览器不在飞书里时，配套页用它嵌模拟群。
+   * 开发时 Larklet 预览根地址。框架把它放进 config，`sendApp` 会投到模拟群。
    * 生产环境不要设置。
    */
   previewUrl?: string;
   /**
-   * 开发时在浏览器里打开应用页，不嵌机器人预览。
+   * 开发时在浏览器里直接打开网页。
    * 生产环境不要设置。
    */
   localPreview?: boolean;
@@ -51,21 +51,19 @@ export interface CompanionOptions {
 }
 
 /**
- * 配套网页的接口。
+ * 配套网页的服务端接口。
  *
- * 飞书消息快捷应用打开本页时带上 `bdp_launch_query`。页面用 JSAPI
- * `getBlockActionSourceDetail` 换成 `open_message_id`，再调用这里：
+ * 浏览器端由 `CompanionSession` / `useCompanion` 调用这里：
  *
- * - `GET /api/config`
- * - `POST /api/jsapi-signature`
+ * - `GET /api/config` 页面配置
+ * - `POST /api/jsapi-signature` JSAPI 签名
  * - `POST /api/auth/callback` 用 `requestAccess` 的 code 换用户身份
  * - `POST /api/message` 读来源消息的类型。先用机器人身份读，机器人读不到才用用户身份
- *
- * 从聊天框加号菜单打开时没有来源消息，当前会话由页面用 JSAPI
- * `getTriggerContext` 直接读，不用经过这里。页面另外会读：
- *
  * - `GET /api/apps` 读取 Larklet 的 `/_larklet/apps`
- * - `POST /api/apps/send` 按应用路径渲染一张新卡片，发到当前会话
+ * - `POST /api/apps/send` 按应用路径渲染一张新卡片，发到会话
+ * - `POST /api/preview/deliver` 开发时把卡片投到模拟群
+ *
+ * 消息 ID 与当前会话由客户端通过飞书 JSAPI 取得，不经过服务端。
  */
 export function createCompanionApp(options: CompanionOptions = {}): Hono {
   const app = new Hono();
