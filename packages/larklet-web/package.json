@@ -1,6 +1,6 @@
 {
   "name": "larklet-web",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Larklet 机器人的配套网页框架：场景识别、免登鉴权、来源消息与当前会话。",
   "type": "module",
   "exports": {
